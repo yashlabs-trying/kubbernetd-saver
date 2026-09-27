@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: kubbernetd-operator
   namespace: {{ .Values.namespace }}
+  labels:
+    app: kubbernetd-operator
 spec:
   replicas: {{ .Values.operator.replicas }}
   selector:
@@ -17,6 +19,50 @@ spec:
       containers:
         - name: operator
           image: {{ .Values.operator.image }}
+          imagePullPolicy: {{ .Values.operator.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.operator.metricsPort }}
+              name: metrics
           env:
             - name: KUBBERNETD_IDLE_TIMEOUT
               value: "{{ .Values.operator.idleTimeout }}"
+            - name: KUBBERNETD_CHECK_INTERVAL
+              value: "{{ .Values.operator.checkInterval }}"
+            - name: KUBBERNETD_METRICS_PORT
+              value: "{{ .Values.operator.metricsPort }}"
+            - name: KUBBERNETD_SHADOW_PODS
+              value: "{{ .Values.operator.shadowPods }}"
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+
+---
+{{- if .Values.proxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubbernetd-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: kubbernetd-proxy
+spec:
+  replicas: {{ .Values.proxy.replicas }}
+  selector:
+    matchLabels:
+      app: kubbernetd-proxy
+  template:
+    metadata:
+      labels:
+        app: kubbernetd-proxy
+    spec:
+      serviceAccountName: kubbernetd-operator
+      containers:
+        - name: proxy
+          image: {{ .Values.proxy.image }}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: KUBBERNETD_UPSTREAM_PORT
+              value: "{{ .Values.proxy.upstreamPort }}"
+            - name: KUBBERNETD_REQUEST_TTL
+              value: "{{ .Values.proxy.requestTtl }}"
+{{- end }}

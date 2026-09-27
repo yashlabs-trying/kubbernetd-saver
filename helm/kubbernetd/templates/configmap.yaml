@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubbernetd-config
+data:
+  idleTimeout: "300"
+  checkInterval: "30"
+  metricsPort: "8080"
