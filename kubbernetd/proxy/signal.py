@@ -11,14 +11,24 @@ class ScaleSignaler:
     def __init__(self, discovery: ServiceDiscovery):
         self.apps_api = client.AppsV1Api()
         self.discovery = discovery
-        self._poll_interval = 1.0
+        self._poll_interval = 0.5
 
-    async def ensure_ready(self, namespace: str, deployment: str, timeout: float = 30.0) -> bool:
+    async def ensure_ready(self, namespace: str, deployment: str, timeout: float = 120.0) -> bool:
+        ready_before = self.discovery.has_ready_pods(namespace, deployment)
+        if ready_before:
+            return True
+
         self._signal_scale_up(namespace, deployment)
         return await self._wait_for_endpoints(namespace, deployment, timeout)
 
     def _signal_scale_up(self, namespace: str, deployment: str):
         try:
+            dep = self.apps_api.read_namespaced_deployment(name=deployment, namespace=namespace)
+            current = dep.spec.replicas or 0
+            if current > 0:
+                log.info("deployment already scaling", namespace=namespace, deployment=deployment, replicas=current)
+                return
+
             body = {"spec": {"replicas": 1}}
             self.apps_api.patch_namespaced_deployment_scale(
                 name=deployment,

@@ -1,6 +1,4 @@
 import asyncio
-import threading
-
 import kopf
 import structlog
 from kubernetes import client, config
@@ -34,31 +32,39 @@ def on_startup(**kwargs):
              idle_timeout=cfg.idle_timeout_seconds)
 
 
+def _resolve_target(spec, fallback_name):
+    target = spec.get("target", {})
+    return target.get("name", fallback_name)
+
+
 @kopf.on.create("kubbernetd.io", "v1", "costsavers")
 def on_create(spec, namespace, name, **kwargs):
-    log.info("costsaver created", name=name, namespace=namespace)
-    controller.register_service(name, namespace, spec)
+    deployment_name = _resolve_target(spec, name)
+    log.info("costsaver created", crd_name=name, deployment=deployment_name, namespace=namespace)
+    controller.register_service(deployment_name, namespace, spec)
 
 
 @kopf.on.update("kubbernetd.io", "v1", "costsavers")
 def on_update(spec, namespace, name, **kwargs):
-    log.info("costsaver updated", name=name, namespace=namespace)
-    controller.update_service(name, namespace, spec)
+    deployment_name = _resolve_target(spec, name)
+    log.info("costsaver updated", crd_name=name, deployment=deployment_name, namespace=namespace)
+    controller.update_service(deployment_name, namespace, spec)
 
 
 @kopf.on.delete("kubbernetd.io", "v1", "costsavers")
 def on_delete(namespace, name, **kwargs):
-    log.info("costsaver deleted", name=name, namespace=namespace)
-    controller.remove_service(name, namespace)
+    controller.remove_service_by_crd(namespace, name)
 
 
 @kopf.on.resume("kubbernetd.io", "v1", "costsavers")
 def on_resume(spec, namespace, name, **kwargs):
-    log.info("costsaver resumed (operator restart)", name=name, namespace=namespace)
-    controller.register_service(name, namespace, spec)
+    deployment_name = _resolve_target(spec, name)
+    log.info("costsaver resumed (operator restart)", crd_name=name, deployment=deployment_name, namespace=namespace)
+    controller.register_service(deployment_name, namespace, spec)
 
 
 def main():
+    import threading
     try:
         config.load_incluster_client()
     except Exception:
