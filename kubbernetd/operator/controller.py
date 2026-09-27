@@ -30,7 +30,7 @@ class Controller:
         self.idle_detector = IdleDetector(config)
         self.scaler = Scaler(self.apps_api)
         self.metrics = MetricsExporter(config)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._services: dict[tuple[str, str], dict] = {}
         self._in_flight: dict[tuple[str, str], int] = {}
         self._crd_to_deployment: dict[tuple[str, str], tuple[str, str]] = {}

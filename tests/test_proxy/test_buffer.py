@@ -1,56 +1,42 @@
+import asyncio
 import time
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from aiohttp import web
-from kubbernetd.proxy.buffer import RequestBuffer, BufferedRequest
+from kubbernetd.proxy.buffer import RequestBuffer
 
 
 @pytest.fixture
 def buffer():
-    return RequestBuffer(max_buffer_size=5, request_ttl=30.0)
+    return RequestBuffer(max_waiters=5, request_ttl=30.0)
 
 
 class TestBuffer:
-    def test_buffer_accepts_request(self, buffer):
-        req = Mock(spec=web.Request)
-        req.method = "GET"
-        req.path_qs = "/predict"
-        req.headers = {"host": "test"}
-        req.body = b""
+    def test_add_waiter(self, buffer):
+        future = asyncio.get_event_loop().create_future()
+        buffer.add_waiter("default", "test-svc", future)
+        assert buffer.waiter_count("default", "test-svc") == 1
 
-        resp = buffer.buffer("default", "test-svc", req)
-        assert resp.status == 202
-        assert buffer.queue_size("default", "test-svc") == 1
-
-    def test_buffer_full(self, buffer):
+    def test_max_waiters_rejects(self, buffer):
         for i in range(5):
-            req = Mock(spec=web.Request)
-            req.method = "GET"
-            req.path_qs = "/predict"
-            req.headers = {"host": "test"}
-            req.body = b""
-            buffer.buffer("default", "test-svc", req)
+            fut = asyncio.get_event_loop().create_future()
+            buffer.add_waiter("default", "svc", fut)
 
-        req = Mock(spec=web.Request)
-        req.method = "GET"
-        req.path_qs = "/predict"
-        req.headers = {"host": "test"}
-        req.body = b""
-        resp = buffer.buffer("default", "test-svc", req)
-        assert resp.status == 503
+        rejected_future = asyncio.get_event_loop().create_future()
+        buffer.add_waiter("default", "svc", rejected_future)
+        assert rejected_future.done()
+        with pytest.raises(Exception, match="too many waiters"):
+            rejected_future.result()
 
-    def test_pop_ready_returns_all_entries(self, buffer):
-        req = Mock(spec=web.Request)
-        req.method = "GET"
-        req.path_qs = "/predict"
-        req.headers = {"host": "test"}
-        req.body = b""
-        buffer.buffer("default", "test-svc", req)
-        buffer.buffer("default", "test-svc", req)
+    def test_pop_waiters_returns_all(self, buffer):
+        fut1 = asyncio.get_event_loop().create_future()
+        fut2 = asyncio.get_event_loop().create_future()
+        buffer.add_waiter("default", "svc", fut1)
+        buffer.add_waiter("default", "svc", fut2)
 
-        entries = buffer.pop_ready("default", "test-svc")
+        entries = buffer.pop_waiters("default", "svc")
         assert len(entries) == 2
-        assert buffer.queue_size("default", "test-svc") == 0
+        assert buffer.waiter_count("default", "svc") == 0
 
     def test_needs_scale_signal(self, buffer):
         assert buffer.needs_scale_signal("default", "svc") is True
@@ -61,27 +47,12 @@ class TestBuffer:
         buffer.mark_scaled("default", "svc")
         assert buffer.needs_scale_signal("default", "svc") is True
 
-    def test_cleanup_expired(self, buffer):
-        req = Mock(spec=web.Request)
-        req.method = "GET"
-        req.path_qs = "/predict"
-        req.headers = {"host": "test"}
-        req.body = b""
-        buffer.buffer("default", "svc", req)
-        buffer._queues[("default", "svc")][0].created_at = time.monotonic() - 60
-        expired = buffer.cleanup_expired()
-        assert expired == 1
-        assert buffer.queue_size("default", "svc") == 0
+    def test_cleanup_expired_resolves_futures(self, buffer):
+        fut = asyncio.get_event_loop().create_future()
+        buffer.add_waiter("default", "svc", fut)
+        buffer._waiters[("default", "svc")][0][1].created_at = time.monotonic() - 60
 
-    def test_cleanup_mixed(self, buffer):
-        req = Mock(spec=web.Request)
-        req.method = "GET"
-        req.path_qs = "/predict"
-        req.headers = {"host": "test"}
-        req.body = b""
-        buffer.buffer("default", "svc", req)
-        buffer._queues[("default", "svc")][0].created_at = time.monotonic() - 60
-        buffer.buffer("default", "svc", req)
         expired = buffer.cleanup_expired()
         assert expired == 1
-        assert buffer.queue_size("default", "svc") == 1
+        assert buffer.waiter_count("default", "svc") == 0
+        assert fut.done()
