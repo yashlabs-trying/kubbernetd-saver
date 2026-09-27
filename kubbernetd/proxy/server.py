@@ -1,6 +1,6 @@
 import asyncio
 import structlog
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 
 from kubbernetd.proxy.buffer import RequestBuffer
 from kubbernetd.proxy.forwarder import RequestForwarder
@@ -26,6 +26,7 @@ class ProxyServer:
         self.cleanup_interval = cleanup_interval
         self.app = web.Application()
         self.app.router.add_route("*", "/{tail:.*}", self.handle_request)
+        self._draining: set[tuple[str, str]] = set()
 
     async def start_background_tasks(self):
         asyncio.create_task(self._cleanup_loop())
@@ -47,46 +48,68 @@ class ProxyServer:
         if self.discovery.has_ready_pods(namespace, service):
             ips = self.discovery.resolve(namespace, service)
             if ips:
-                return await self.forwarder.forward(
-                    method=request.method,
-                    path=request.path_qs or request.path,
-                    headers=dict(request.headers),
-                    body=await self._read_body(request),
+                return await self.forwarder.forward_streaming(
+                    request=request,
                     target_ip=ips[0],
                 )
 
-        queued = self.buffer.buffer(namespace, service, request)
-        if queued.status != 202:
-            return queued
+        return await self._wait_for_upstream(request, namespace, service)
 
-        if self.buffer.needs_scale_signal(namespace, service):
-            asyncio.create_task(self._drain_after_scale(namespace, service))
+    async def _wait_for_upstream(
+        self, request: web.Request, namespace: str, service: str
+    ) -> web.Response:
+        key = (namespace, service)
 
-        return queued
+        result_future = asyncio.get_event_loop().create_future()
+        self.buffer.add_waiter(namespace, service, result_future)
 
-    async def _drain_after_scale(self, namespace: str, service: str):
+        should_signal = self.buffer.needs_scale_signal(namespace, service)
+        if should_signal and key not in self._draining:
+            self._draining.add(key)
+            asyncio.create_task(self._drain_waiter(namespace, service))
+
+        body = await self._read_body(request)
+        self.buffer.store_request_data(namespace, service, request, body)
+
+        try:
+            response = await asyncio.wait_for(result_future, timeout=30.0)
+            return response
+        except asyncio.TimeoutError:
+            log.warning("upstream wait timeout", service=service, namespace=namespace)
+            return web.Response(status=504, text="upstream did not become ready in time")
+
+    async def _drain_waiter(self, namespace: str, service: str):
         try:
             ready = await self.signaler.ensure_ready(namespace, service)
             if ready:
-                entries = self.buffer.pop_ready(namespace, service)
                 ips = self.discovery.resolve(namespace, service)
                 if ips:
-                    for entry in entries:
-                        entry.response = await self.forwarder.forward(
-                            method=entry.method,
-                            path=entry.path,
-                            headers=entry.headers,
-                            body=entry.body,
-                            target_ip=ips[0],
-                        )
-                    log.info("drained buffered requests", service=service, count=len(entries))
+                    requests_data = self.buffer.pop_waiters(namespace, service)
+                    for req_data, future in requests_data:
+                        if not future.done():
+                            resp = await self.forwarder.forward_streaming(
+                                request=req_data,
+                                target_ip=ips[0],
+                            )
+                            future.set_result(resp)
+                    log.info("drained waiters", service=service, count=len(requests_data))
                 else:
-                    log.warning("no endpoints after scale-up", service=service)
+                    self._fail_waiters(namespace, service, "no endpoints after scale-up")
             else:
-                self.buffer.mark_scaled(namespace, service)
+                self._fail_waiters(namespace, service, "scale-up timed out")
         except Exception as e:
-            log.exception("drain failed", service=service, namespace=namespace, error=str(e))
+            log.exception("drain failed", service=service, error=str(e))
+            self._fail_waiters(namespace, service, f"drain error: {e}")
+        finally:
+            self._draining.discard((namespace, service))
             self.buffer.mark_scaled(namespace, service)
+
+    def _fail_waiters(self, namespace: str, service: str, reason: str):
+        entries = self.buffer.pop_waiters(namespace, service)
+        for _, future in entries:
+            if not future.done():
+                future.set_exception(Exception(reason))
+        log.warning("failed waiters", service=service, count=len(entries), reason=reason)
 
     async def _read_body(self, request: web.Request) -> bytes:
         try:
