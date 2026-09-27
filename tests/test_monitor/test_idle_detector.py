@@ -17,9 +17,10 @@ def test_touch_and_idle(detector):
     assert idle is not None and idle < 1
 
 
-def test_no_request_returns_none(detector):
+def test_no_request_returns_zero_when_watched(detector):
     detector.watch("default", "test")
-    assert detector.idle_seconds("default", "test") is not None
+    idle = detector.idle_seconds("default", "test")
+    assert idle is not None and idle >= 0
 
 
 def test_unwatched_returns_none(detector):
@@ -52,3 +53,16 @@ def test_cleanup_stale_removes_only_unwatched(detector):
     detector.cleanup_stale(max_age_seconds=86400)
     assert ("ns", "watched") in detector._last_request
     assert ("ns", "unwatched_stale") not in detector._last_request
+
+
+def test_cleanup_idempotent(detector):
+    detector.cleanup_stale()
+    detector.cleanup_stale()
+
+
+def test_touch_updates_timestamp(detector):
+    detector.watch("ns", "svc")
+    t1 = detector._last_request[("ns", "svc")]
+    detector.touch("ns", "svc")
+    t2 = detector._last_request[("ns", "svc")]
+    assert t2 >= t1

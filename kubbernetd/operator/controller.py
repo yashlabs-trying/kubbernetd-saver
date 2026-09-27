@@ -1,6 +1,6 @@
 from kubernetes import client
 
-from kubbernetd.common.config import OperatorConfig
+from kubbernetd.common.types import OperatorConfig
 from kubbernetd.monitor.idle_detector import IdleDetector
 from kubbernetd.operator.scaler import Scaler
 from kubbernetd.operator.metrics import MetricsExporter
@@ -15,6 +15,7 @@ class Controller:
         self.scaler = Scaler(self.apps_api)
         self.metrics = MetricsExporter(config)
         self.services = {}
+        self._tick_count = 0
 
     def register_service(self, name: str, namespace: str, spec: dict):
         self.services[(name, namespace)] = {
@@ -35,6 +36,11 @@ class Controller:
         self.idle_detector.unwatch(namespace, name)
 
     def tick(self):
+        self._tick_count += 1
+
+        if self._tick_count % 10 == 0:
+            self.idle_detector.cleanup_stale()
+
         for (name, namespace), svc in list(self.services.items()):
             idle_seconds = self.idle_detector.idle_seconds(namespace, name)
             timeout = svc["idle_timeout"]

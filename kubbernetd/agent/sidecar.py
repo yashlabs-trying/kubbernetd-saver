@@ -3,7 +3,7 @@ import signal
 import structlog
 from kubernetes import client, config
 
-from kubbernetd.common.config import AgentConfig
+from kubbernetd.common.types import AgentConfig
 from kubbernetd.agent.warmer import ModelWarmer
 from kubbernetd.agent.reporter import StatusReporter
 
@@ -33,8 +33,7 @@ class Sidecar:
         self.reporter.mark_ready()
 
         while not self._shutdown:
-            self.reporter.report_heartbeat()
-            await asyncio.sleep(self.config.report_interval_seconds)
+            await asyncio.sleep(1)
 
         self.reporter.mark_stopped()
         log.info("sidecar stopped cleanly")
