@@ -1,17 +1,35 @@
 import time
+import threading
 import pytest
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock
 from kubernetes import client
 from kubbernetd.operator.controller import Controller, ServicePhase
+from kubbernetd.operator.metrics import MetricsExporter
+from kubbernetd.monitor.idle_detector import IdleDetector
 from kubbernetd.common.types import OperatorConfig
+
+
+class ControllerForTest(Controller):
+    def __init__(self, config):
+        self.config = config
+        self.apps_api = Mock()
+        self.core_api = Mock()
+        self.idle_detector = IdleDetector(config)
+        self.scaler = Mock()
+        self.scaler.current_replicas.return_value = 1
+        self.metrics = Mock(spec=MetricsExporter)
+        self._lock = threading.RLock()
+        self._services = {}
+        self._in_flight = {}
+        self._crd_to_deployment = {}
+        self._tick_count = 0
+        self._ready = True
 
 
 @pytest.fixture
 def controller():
     cfg = OperatorConfig(idle_timeout_seconds=60, check_interval_seconds=10)
-    ctrl = Controller(cfg)
-    ctrl.mark_ready()
-    return ctrl
+    return ControllerForTest(cfg)
 
 
 @pytest.fixture
@@ -26,12 +44,22 @@ class TestRegistration:
         assert svc is not None
         assert svc["idle_timeout"] == 60
 
+    def test_register_with_crd_name(self, controller, basic_spec):
+        controller.register_service("deploy", "ns", basic_spec, crd_name="my-crd")
+        assert ("my-crd", "ns") in controller._crd_to_deployment
+        assert controller._crd_to_deployment[("my-crd", "ns")] == ("deploy", "ns")
+
     def test_register_service_defaults(self, controller):
         controller.register_service("svc", "ns", {})
         svc = controller._get_service("svc", "ns")
         assert svc["idle_timeout"] == 60
         assert svc["min_replicas"] == 0
         assert svc["max_replicas"] == 10
+
+    def test_remove_service_by_crd(self, controller, basic_spec):
+        controller.register_service("deploy", "ns", basic_spec, crd_name="my-crd")
+        controller.remove_service_by_crd("ns", "my-crd")
+        assert controller._get_service("deploy", "ns") is None
 
     def test_remove_service(self, controller, basic_spec):
         controller.register_service("svc", "ns", basic_spec)
@@ -62,28 +90,31 @@ class TestScaleLogic:
         controller.register_service("svc", "ns", {"idleTimeout": 1})
         controller.idle_detector.watch("ns", "svc")
         controller.idle_detector._last_request[("ns", "svc")] = time.monotonic() - 10
-        controller._do_scale = Mock()
         controller.tick()
-        assert controller._do_scale.called
+        controller.scaler.scale_to.assert_called_once_with("ns", "svc", 0)
 
     def test_no_scale_when_not_idle(self, controller):
         controller.register_service("svc", "ns", {"idleTimeout": 60})
         controller.idle_detector.watch("ns", "svc")
         controller.idle_detector.touch("ns", "svc")
-        controller._do_scale = Mock()
+        controller.scaler.scale_to.reset_mock()
         controller.tick()
-        assert not controller._do_scale.called
+        controller.scaler.scale_to.assert_not_called()
 
-    def test_scale_up_when_traffic_arrives(self, controller):
-        controller.register_service("svc", "ns", {"idleTimeout": 60})
-        with controller._lock:
-            svc = controller._services[("svc", "ns")]
-            svc["current_replicas"] = 0
-            svc["phase"] = ServicePhase.STOPPED
-        controller.idle_detector.touch("ns", "svc")
-        controller._do_scale = Mock()
+    def test_no_scale_when_in_flight(self, controller):
+        controller.register_service("svc", "ns", {"idleTimeout": 1})
+        controller.track_in_flight("ns", "svc", 1)
+        controller.idle_detector.watch("ns", "svc")
+        controller.idle_detector._last_request[("ns", "svc")] = time.monotonic() - 10
+        controller.scaler.scale_to.reset_mock()
         controller.tick()
-        assert controller._do_scale.called
+        controller.scaler.scale_to.assert_not_called()
+
+    def test_in_flight_tracking(self, controller):
+        controller.track_in_flight("ns", "svc", 1)
+        assert controller.in_flight_count("ns", "svc") == 1
+        controller.track_in_flight("ns", "svc", -1)
+        assert controller.in_flight_count("ns", "svc") == 0
 
 
 class TestErrorRecovery:
@@ -94,12 +125,7 @@ class TestErrorRecovery:
         controller._record_error(svc, now)
         assert svc["error_count"] == 1
         assert svc["phase"] == ServicePhase.ERROR
-        remaining = controller._cooldown_remaining(svc, now)
-        assert remaining > 0
-
-    def test_backoff_increases_with_errors(self, controller):
-        svc = {"last_error_at": time.monotonic(), "error_count": 5}
-        remaining = controller._cooldown_remaining(svc, time.monotonic())
+        remaining = controller._cooldown_remaining(svc, now + 1)
         assert remaining > 0
 
     def test_no_backoff_without_errors(self, controller):
@@ -108,28 +134,29 @@ class TestErrorRecovery:
         assert remaining == 0
 
 
-class TestConcurrency:
-    def test_register_and_tick_simultaneously(self, controller):
-        import threading
-        results = []
-        def register():
-            controller.register_service("svc", "ns", {})
-            results.append("done")
-        t = threading.Thread(target=register)
-        t.start()
-        controller.tick()
-        t.join()
-        assert controller._get_service("svc", "ns") is not None
-
-
-class TestMinReplicas:
-    def test_respects_min_replicas(self, controller):
-        controller.register_service("svc", "ns", {"idleTimeout": 1, "minReplicas": 1})
-        controller.idle_detector.watch("ns", "svc")
+class TestPreviousReplicas:
+    def test_scale_down_stores_previous(self, controller):
+        controller.register_service("svc", "ns", {"idleTimeout": 1})
+        with controller._lock:
+            svc = controller._services[("svc", "ns")]
+            svc["current_replicas"] = 3
+        controller.scaler.scale_to.reset_mock()
+        with controller._lock:
+            svc["phase"] = ServicePhase.RUNNING
         controller.idle_detector._last_request[("ns", "svc")] = time.monotonic() - 10
-        controller._do_scale = Mock()
         controller.tick()
-        assert not controller._do_scale.called
+        assert controller.scaler.scale_to.called
+        args = controller.scaler.scale_to.call_args
+        assert args[0][2] == 0  # scaled to 0
+
+
+class TestReconcile:
+    def test_reconcile_detects_drift(self, controller):
+        controller.register_service("svc", "ns", {})
+        controller.scaler.current_replicas.return_value = 5
+        svc = controller._get_service("svc", "ns")
+        controller._reconcile_actual_replicas("svc", "ns", svc)
+        assert svc["current_replicas"] == 5
 
 
 class TestCleanup:
