@@ -1,9 +1,25 @@
+import time
+import threading
+from enum import Enum, auto
+
+import structlog
 from kubernetes import client
 
 from kubbernetd.common.types import OperatorConfig
 from kubbernetd.monitor.idle_detector import IdleDetector
 from kubbernetd.operator.scaler import Scaler
 from kubbernetd.operator.metrics import MetricsExporter
+
+log = structlog.get_logger()
+
+
+class ServicePhase(Enum):
+    UNKNOWN = auto()
+    RUNNING = auto()
+    SCALING_DOWN = auto()
+    SCALING_UP = auto()
+    STOPPED = auto()
+    ERROR = auto()
 
 
 class Controller:
@@ -14,43 +30,172 @@ class Controller:
         self.idle_detector = IdleDetector(config)
         self.scaler = Scaler(self.apps_api)
         self.metrics = MetricsExporter(config)
-        self.services = {}
+        self._lock = threading.Lock()
+        self._services: dict[tuple[str, str], dict] = {}
         self._tick_count = 0
+        self._ready = False
+
+    def mark_ready(self):
+        self._ready = True
+
+    def sync_from_cluster(self):
+        try:
+            crds = self.apps_api.list_deployment_for_all_namespaces().items
+            log.info("synced deployment count from cluster", count=len(crds))
+        except Exception as e:
+            log.warning("initial cluster sync failed, will retry", error=str(e))
 
     def register_service(self, name: str, namespace: str, spec: dict):
-        self.services[(name, namespace)] = {
-            "name": name,
-            "namespace": namespace,
-            "spec": spec,
-            "idle_timeout": spec.get("idleTimeout", 300),
-            "current_replicas": 1,
-        }
+        idle_timeout = spec.get("idleTimeout", self.config.idle_timeout_seconds)
+        min_replicas = spec.get("minReplicas", 0)
+        max_replicas = spec.get("maxReplicas", 10)
+        shadow_pods = spec.get("shadowPods", self.config.shadow_pods)
+
+        current_replicas = self._resolve_initial_replicas(namespace, name)
+
+        with self._lock:
+            self._services[(name, namespace)] = {
+                "name": name,
+                "namespace": namespace,
+                "spec": spec,
+                "idle_timeout": idle_timeout,
+                "min_replicas": min_replicas,
+                "max_replicas": max_replicas,
+                "shadow_pods": shadow_pods,
+                "current_replicas": current_replicas,
+                "phase": ServicePhase.RUNNING if current_replicas > 0 else ServicePhase.STOPPED,
+                "last_error_at": None,
+                "error_count": 0,
+            }
         self.idle_detector.watch(namespace, name)
+        log.info("registered service", name=name, namespace=namespace,
+                 timeout=idle_timeout, replicas=current_replicas)
+
+    def _resolve_initial_replicas(self, namespace: str, name: str) -> int:
+        try:
+            return self.scaler.current_replicas(namespace, name)
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                log.error("deployment not found on register", name=name, namespace=namespace)
+            return 0
+        except Exception as e:
+            log.warning("could not resolve initial replicas", name=name, error=str(e))
+            return 0
 
     def update_service(self, name: str, namespace: str, spec: dict):
-        self.services[(name, namespace)]["spec"] = spec
-        self.services[(name, namespace)]["idle_timeout"] = spec.get("idleTimeout", 300)
+        with self._lock:
+            svc = self._services.get((name, namespace))
+            if svc is None:
+                self.register_service(name, namespace, spec)
+                return
+            svc["spec"] = spec
+            svc["idle_timeout"] = spec.get("idleTimeout", self.config.idle_timeout_seconds)
+            svc["min_replicas"] = spec.get("minReplicas", 0)
+            svc["max_replicas"] = spec.get("maxReplicas", 10)
+            svc["shadow_pods"] = spec.get("shadowPods", self.config.shadow_pods)
+        log.info("updated service", name=name, namespace=namespace)
 
     def remove_service(self, name: str, namespace: str):
-        self.services.pop((name, namespace), None)
+        with self._lock:
+            self._services.pop((name, namespace), None)
         self.idle_detector.unwatch(namespace, name)
+        log.info("removed service", name=name, namespace=namespace)
+
+    def _get_service(self, name: str, namespace: str):
+        with self._lock:
+            return self._services.get((name, namespace))
+
+    def _service_exists(self, name: str, namespace: str) -> bool:
+        with self._lock:
+            return (name, namespace) in self._services
 
     def tick(self):
         self._tick_count += 1
 
         if self._tick_count % 10 == 0:
-            self.idle_detector.cleanup_stale()
+            self.idle_detector.cleanup_stale(
+                max_age_seconds=self.config.stale_cleanup_age
+            )
 
-        for (name, namespace), svc in list(self.services.items()):
-            idle_seconds = self.idle_detector.idle_seconds(namespace, name)
-            timeout = svc["idle_timeout"]
-            if idle_seconds is None:
-                continue
-            if idle_seconds > timeout and svc["current_replicas"] > 0:
-                self.scaler.scale_to(namespace, name, 0)
-                svc["current_replicas"] = 0
-                self.metrics.record_scale(namespace, name, to_zero=True)
-            elif idle_seconds == 0 and svc["current_replicas"] == 0:
-                self.scaler.scale_to(namespace, name, 1)
-                svc["current_replicas"] = 1
-                self.metrics.record_scale(namespace, name, to_zero=False)
+        with self._lock:
+            services_snapshot = list(self._services.keys())
+
+        for name, namespace in services_snapshot:
+            self._process_service(name, namespace)
+
+    def _process_service(self, name: str, namespace: str):
+        svc = self._get_service(name, namespace)
+        if svc is None:
+            return
+
+        if svc.get("idle_timeout", 0) <= 0:
+            return
+
+        idle_seconds = self.idle_detector.idle_seconds(namespace, name)
+        if idle_seconds is None:
+            return
+
+        now = time.monotonic()
+        cooldown_remaining = self._cooldown_remaining(svc, now)
+        if cooldown_remaining > 0:
+            return
+
+        current = svc["current_replicas"]
+        timeout = svc["idle_timeout"]
+        min_r = svc["min_replicas"]
+        max_r = svc["max_replicas"]
+        phase = svc["phase"]
+
+        should_scale_down = (
+            current > min_r
+            and idle_seconds > timeout
+            and phase in (ServicePhase.RUNNING, ServicePhase.ERROR)
+        )
+        should_scale_up = (
+            current < min(1, max_r)
+            and idle_seconds < timeout
+            and phase in (ServicePhase.STOPPED, ServicePhase.ERROR)
+        )
+
+        if should_scale_down:
+            target = max(min_r, 0)
+            self._do_scale(name, namespace, target, svc, now, "idle_timeout")
+        elif should_scale_up:
+            target = min(1, max_r)
+            self._do_scale(name, namespace, target, svc, now, "traffic_detected")
+
+    def _cooldown_remaining(self, svc: dict, now: float) -> float:
+        last_error = svc.get("last_error_at")
+        if last_error is None:
+            return 0
+        errors = svc.get("error_count", 0)
+        backoff = min(2 ** errors, 60)
+        elapsed = now - last_error
+        return max(0.0, backoff - elapsed)
+
+    def _do_scale(self, name: str, namespace: str, target: int,
+                  svc: dict, now: float, reason: str):
+        try:
+            self.scaler.scale_to(namespace, name, target)
+            self.metrics.record_scale(namespace, name, to_zero=(target == 0))
+            with self._lock:
+                svc["current_replicas"] = target
+                svc["phase"] = ServicePhase.STOPPED if target == 0 else ServicePhase.RUNNING
+                svc["last_error_at"] = None
+                svc["error_count"] = 0
+            log.info("scale succeeded", name=name, namespace=namespace,
+                     replicas=target, reason=reason)
+        except client.exceptions.ApiException as e:
+            log.warning("scale failed (API)", name=name, namespace=namespace,
+                        replicas=target, status=e.status, reason=str(e))
+            self._record_error(svc, now)
+        except Exception as e:
+            log.warning("scale failed (unexpected)", name=name,
+                        namespace=namespace, error=str(e))
+            self._record_error(svc, now)
+
+    def _record_error(self, svc: dict, now: float):
+        with self._lock:
+            svc["last_error_at"] = now
+            svc["error_count"] = svc.get("error_count", 0) + 1
+            svc["phase"] = ServicePhase.ERROR

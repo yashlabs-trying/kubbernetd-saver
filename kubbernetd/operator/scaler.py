@@ -19,4 +19,6 @@ class Scaler:
 
     def current_replicas(self, namespace: str, name: str) -> int:
         dep = self.apps_api.read_namespaced_deployment(name=name, namespace=namespace)
+        if dep.spec.replicas is None:
+            return 1
         return dep.spec.replicas
