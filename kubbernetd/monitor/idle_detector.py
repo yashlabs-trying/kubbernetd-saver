@@ -1,10 +1,12 @@
+import os
+import sys
 import time
 from threading import Lock
 from typing import Optional
 
 import structlog
 
-from kubbernetd.common.config import OperatorConfig
+from kubbernetd.common.types import OperatorConfig
 
 log = structlog.get_logger()
 
@@ -15,6 +17,12 @@ class IdleDetector:
         self._last_request: dict[tuple[str, str], float] = {}
         self._watched: set[tuple[str, str]] = set()
         self._lock = Lock()
+
+        if sys.platform == "win32":
+            log.warning(
+                "Running on Windows — time.monotonic() is not reliable for production. "
+                "Use Linux for production deployments."
+            )
 
     def watch(self, namespace: str, name: str):
         with self._lock:
@@ -55,6 +63,7 @@ class IdleDetector:
 
     def cleanup_stale(self, max_age_seconds: float = 86400):
         now = time.monotonic()
+        removed = 0
         with self._lock:
             stale = [
                 k for k, v in self._last_request.items()
@@ -62,3 +71,6 @@ class IdleDetector:
             ]
             for k in stale:
                 del self._last_request[k]
+                removed += 1
+        if removed:
+            log.debug("cleaned up stale entries", count=removed)

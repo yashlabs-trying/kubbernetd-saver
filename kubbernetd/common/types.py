@@ -41,11 +41,11 @@ class OperatorConfig:
     namespace: Optional[str] = environ.get("KUBBERNETD_NAMESPACE", None)
     metrics_port: int = int(environ.get("KUBBERNETD_METRICS_PORT", "8080"))
     shadow_pods: int = int(environ.get("KUBBERNETD_SHADOW_PODS", "1"))
+    stale_cleanup_age: int = int(environ.get("KUBBERNETD_STALE_CLEANUP_AGE", "86400"))
 
 
 @dataclass
 class AgentConfig:
-    report_interval_seconds: int = int(environ.get("KUBBERNETD_AGENT_REPORT_INTERVAL", "15"))
     warmup_command: Optional[str] = environ.get("KUBBERNETD_WARMUP_CMD", None)
     model_path: Optional[str] = environ.get("KUBBERNETD_MODEL_PATH", None)
     shadow_mode: bool = environ.get("KUBBERNETD_SHADOW_MODE", "false").lower() == "true"

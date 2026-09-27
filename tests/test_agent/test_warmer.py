@@ -16,6 +16,7 @@ def test_warmup_runs_command():
     warmer = ModelWarmer(cfg)
     result = warmer.warm_up()
     assert result is True
+    assert warmer.is_ready is True
 
 
 def test_warmup_fails_on_bad_command():
@@ -26,7 +27,7 @@ def test_warmup_fails_on_bad_command():
     assert warmer.is_ready is False
 
 
-def test_model_path_check_logs_warning(caplog):
+def test_warmup_checks_model_path(caplog):
     cfg = AgentConfig(model_path="/nonexistent/path/model.bin")
     warmer = ModelWarmer(cfg)
     warmer.warm_up()
