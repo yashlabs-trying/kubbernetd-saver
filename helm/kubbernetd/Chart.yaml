@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kubbernetd
+description: Scale K8s pods to zero when idle. Save costs.
+type: application
+version: 0.1.0
+appVersion: 0.1.0

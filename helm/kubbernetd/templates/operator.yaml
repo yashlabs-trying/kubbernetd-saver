@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubbernetd-operator
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      app: kubbernetd-operator
+  template:
+    metadata:
+      labels:
+        app: kubbernetd-operator
+    spec:
+      serviceAccountName: kubbernetd-operator
+      containers:
+        - name: operator
+          image: {{ .Values.operator.image }}
+          env:
+            - name: KUBBERNETD_IDLE_TIMEOUT
+              value: "{{ .Values.operator.idleTimeout }}"

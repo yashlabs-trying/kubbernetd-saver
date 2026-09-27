@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "kubbernetd"
+version = "0.1.0"
+description = "Scale K8s pods to zero when idle to save costs. Instant cold start."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "kubbernetd", email = "dev@kubbernetd.io" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "kopf>=1.37",
+    "kubernetes>=27.0",
+    "typer>=0.9",
+    "aiohttp>=3.9",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+    "structlog>=24.0",
+]
+
+[project.scripts]
+kubbernetd = "kubbernetd.cli.main:app"
+kubbernetd-operator = "kubbernetd.operator.main:main"
+kubbernetd-agent = "kubbernetd.agent.sidecar:main"
+kubbernetd-proxy = "kubbernetd.proxy.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kubbernetd*"]

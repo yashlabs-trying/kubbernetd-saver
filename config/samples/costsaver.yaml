@@ -1,0 +1,13 @@
+apiVersion: kubbernetd.io/v1
+kind: CostSaver
+metadata:
+  name: my-model-saver
+  namespace: default
+spec:
+  target:
+    kind: Deployment
+    name: my-model
+  idleTimeout: 300
+  minReplicas: 0
+  maxReplicas: 5
+  shadowPods: 1

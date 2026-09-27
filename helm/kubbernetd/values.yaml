@@ -1,0 +1,11 @@
+namespace: kubbernetd
+operator:
+  image: kubbernetd/operator:latest
+  replicas: 1
+  idleTimeout: 300
+  metricsPort: 8080
+proxy:
+  enabled: false
+  image: kubbernetd/proxy:latest
+agent:
+  warmupCommand: ""

@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubbernetd-proxy
+  namespace: kubbernetd
+  labels:
+    app: kubbernetd-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubbernetd-proxy
+  template:
+    metadata:
+      labels:
+        app: kubbernetd-proxy
+    spec:
+      serviceAccountName: kubbernetd-operator
+      containers:
+        - name: proxy
+          image: kubbernetd/proxy:latest
+          ports:
+            - containerPort: 8080
