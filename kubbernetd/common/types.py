@@ -54,5 +54,8 @@ class AgentConfig:
 @dataclass
 class ProxyConfig:
     listen_port: int = int(environ.get("KUBBERNETD_PROXY_PORT", "8080"))
+    upstream_port: int = int(environ.get("KUBBERNETD_UPSTREAM_PORT", "8080"))
     upstream_timeout_seconds: int = int(environ.get("KUBBERNETD_UPSTREAM_TIMEOUT", "30"))
     max_buffer_size: int = int(environ.get("KUBBERNETD_MAX_BUFFER", "256"))
+    request_ttl_seconds: int = int(environ.get("KUBBERNETD_REQUEST_TTL", "30"))
+    cleanup_interval_seconds: int = int(environ.get("KUBBERNETD_CLEANUP_INTERVAL", "60"))
