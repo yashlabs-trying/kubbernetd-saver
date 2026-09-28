@@ -6,6 +6,7 @@ from kubernetes import client, config
 from kubbernetd.common.types import AgentConfig
 from kubbernetd.agent.warmer import ModelWarmer
 from kubbernetd.agent.reporter import StatusReporter
+from kubbernetd.agent.engine_adapter import EngineAdapter
 
 log = structlog.get_logger()
 
@@ -15,6 +16,7 @@ class Sidecar:
         self.config = config
         self.warmer = ModelWarmer(config)
         self.reporter = StatusReporter()
+        self.engine = EngineAdapter(self.reporter, upstream_port=8080)
         self._shutdown = False
 
     def handle_signal(self, signum, frame):
@@ -30,7 +32,7 @@ class Sidecar:
             log.error("warmup failed, exiting")
             return
 
-        self.reporter.mark_ready()
+        asyncio.create_task(self.engine.run_progressive_checks())
 
         while not self._shutdown:
             await asyncio.sleep(1)

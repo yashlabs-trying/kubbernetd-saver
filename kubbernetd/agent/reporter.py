@@ -1,7 +1,6 @@
 import os
 import socket
 import time
-
 import structlog
 from kubernetes import client
 
@@ -48,8 +47,14 @@ class StatusReporter:
         self._update_annotation("kubbernetd.io/agent-status", "stopped")
         log.info("agent marked as stopped")
 
+    def report_stage(self, key: str, value: str):
+        self._update_annotation(f"kubbernetd.io/{key}", value)
+
     def report_last_request(self, timestamp: float):
         self._update_annotation("kubbernetd.io/last-request", str(timestamp))
+
+    def report_active_sequences(self, count: int):
+        self._update_annotation("kubbernetd.io/active-sequences", str(count))
 
     def _update_annotation(self, key: str, value: str):
         for attempt in range(self._max_retries):
