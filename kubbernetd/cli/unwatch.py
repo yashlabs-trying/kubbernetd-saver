@@ -18,16 +18,13 @@ def unwatch(
 
     try:
         custom_api.delete_namespaced_custom_object(
-            group="kubbernetd.io",
-            version="v1",
-            namespace=namespace,
-            plural="costsavers",
-            name=f"{deployment}-saver",
+            group="kubbernetd.io", version="v1", namespace=namespace,
+            plural="replicagroups", name=f"{deployment}-rg",
         )
         typer.echo(f"Stopped watching '{deployment}' in namespace '{namespace}'")
     except client.exceptions.ApiException as e:
         if e.status == 404:
-            typer.echo(f"No CostSaver found for '{deployment}' in namespace '{namespace}'")
+            typer.echo(f"No ReplicaGroup found for '{deployment}' in namespace '{namespace}'")
         else:
             typer.echo(f"API error: {e}", err=True)
             raise typer.Exit(1)

@@ -36,19 +36,19 @@ def _estimate_savings(idle_seconds: float, hourly_cost: float = 0.50) -> float:
 def _fetch_data(core_api, apps_api, custom_api) -> list[dict]:
     rows = []
     try:
-        costsavers = custom_api.list_cluster_custom_object(
-            group="kubbernetd.io", version="v1", plural="costsavers",
+        replicagroups = custom_api.list_cluster_custom_object(
+            group="kubbernetd.io", version="v1", plural="replicagroups",
         )
     except client.exceptions.ApiException:
         try:
-            costsavers = custom_api.list_namespaced_custom_object(
-                group="kubbernetd.io", version="v1", namespace="default", plural="costsavers",
+            replicagroups = custom_api.list_namespaced_custom_object(
+                group="kubbernetd.io", version="v1", namespace="default", plural="replicagroups",
             )
-            costsavers = {"items": costsavers}
+            replicagroups = {"items": replicagroups}
         except Exception:
-            return [{"error": "No CostSaver resources found. Run 'kubbernetd watch <deployment>' first."}]
+            return [{"error": "No ReplicaGroup resources found. Run 'kubbernetd watch <deployment>' first."}]
 
-    for item in costsavers.get("items", []):
+    for item in replicagroups.get("items", []):
         spec = item.get("spec", {})
         target = spec.get("target", {})
         name = target.get("name", "unknown")

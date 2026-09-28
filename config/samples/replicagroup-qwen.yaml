@@ -1,0 +1,33 @@
+apiVersion: kubbernetd.io/v1
+kind: ReplicaGroup
+metadata:
+  name: qwen-70b-serving
+  namespace: default
+spec:
+  model:
+    name: Qwen/Qwen2.5-70B
+    engine: vLLM
+    precision: bf16
+    tensorParallel: 8
+    pipelineParallel: 1
+    gpuPerWorker: 1
+    workers: 8
+    weightShards: 8
+    shardPattern: "qwen-70b/model-rank-{rank}-part-*.safetensors"
+  weightCache:
+    nodeNVMe: true
+    cpuRAM: false
+    gpuVRAM: false
+  targetRef:
+    kind: Deployment
+    name: qwen-worker
+  wakeSLO: 30
+  coldStartTimeout: 300
+  bootstrap:
+    enabled: false
+    bootstrapModel: ""
+    cpuRAM: "0"
+  sleepPolicy:
+    sleepDepth: full
+    idleTimeout: 300
+    activeSequenceThreshold: 0

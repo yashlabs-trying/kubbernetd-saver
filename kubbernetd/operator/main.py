@@ -1,14 +1,18 @@
 import asyncio
+import threading
+
 import kopf
 import structlog
 from kubernetes import client, config
 
-from kubbernetd.operator.controller import Controller
+from kubbernetd.operator.rg_controller import ReplicaGroupController
+from kubbernetd.operator.metrics import MetricsExporter
 from kubbernetd.common.types import OperatorConfig
 
 log = structlog.get_logger()
 cfg = OperatorConfig()
-controller = Controller(cfg)
+metrics = MetricsExporter(cfg, skip_server=False)
+controller = ReplicaGroupController(cfg, metrics)
 
 
 def _tick_loop():
@@ -17,58 +21,54 @@ def _tick_loop():
     while True:
         try:
             controller.tick()
+            metrics.set_watched_count(len(controller._groups))
         except Exception:
-            log.exception("tick loop crashed — continuing")
+            log.exception("tick loop crashed - continuing")
         loop.run_until_complete(asyncio.sleep(cfg.check_interval_seconds))
+
+
+def _resolve_target(spec, fallback_name):
+    target = spec.get("targetRef", {})
+    return target.get("name", fallback_name)
 
 
 @kopf.on.startup()
 def on_startup(**kwargs):
-    controller.mark_ready()
-    controller.sync_from_cluster()
+    controller._tick_count = 0
     thread = threading.Thread(target=_tick_loop, daemon=True, name="tick-loop")
     thread.start()
-    log.info("operator started", check_interval=cfg.check_interval_seconds,
-             idle_timeout=cfg.idle_timeout_seconds)
+    log.info("operator started", check_interval=cfg.check_interval_seconds)
 
 
-def _resolve_target(spec, fallback_name):
-    target = spec.get("target", {})
-    return target.get("name", fallback_name)
-
-
-@kopf.on.create("kubbernetd.io", "v1", "costsavers")
+@kopf.on.create("kubbernetd.io", "v1", "replicagroups")
 def on_create(spec, namespace, name, **kwargs):
-    deployment_name = _resolve_target(spec, name)
-    log.info("costsaver created", crd_name=name, deployment=deployment_name, namespace=namespace)
-    controller.register_service(deployment_name, namespace, spec)
+    log.info("replicagroup created", name=name, namespace=namespace)
+    controller.register_group(name, namespace, spec)
 
 
-@kopf.on.update("kubbernetd.io", "v1", "costsavers")
+@kopf.on.update("kubbernetd.io", "v1", "replicagroups")
 def on_update(spec, namespace, name, **kwargs):
-    deployment_name = _resolve_target(spec, name)
-    log.info("costsaver updated", crd_name=name, deployment=deployment_name, namespace=namespace)
-    controller.update_service(deployment_name, namespace, spec)
+    log.info("replicagroup updated", name=name, namespace=namespace)
+    controller.update_group(name, namespace, spec)
 
 
-@kopf.on.delete("kubbernetd.io", "v1", "costsavers")
+@kopf.on.delete("kubbernetd.io", "v1", "replicagroups")
 def on_delete(namespace, name, **kwargs):
-    controller.remove_service_by_crd(namespace, name)
+    log.info("replicagroup deleted", name=name, namespace=namespace)
+    controller.remove_group(name, namespace)
 
 
-@kopf.on.resume("kubbernetd.io", "v1", "costsavers")
+@kopf.on.resume("kubbernetd.io", "v1", "replicagroups")
 def on_resume(spec, namespace, name, **kwargs):
-    deployment_name = _resolve_target(spec, name)
-    log.info("costsaver resumed (operator restart)", crd_name=name, deployment=deployment_name, namespace=namespace)
-    controller.register_service(deployment_name, namespace, spec)
+    log.info("replicagroup resumed (operator restart)", name=name, namespace=namespace)
+    controller.register_group(name, namespace, spec)
 
 
 def main():
-    import threading
     try:
         config.load_incluster_client()
     except Exception:
-        log.warning("not in cluster — loading kubeconfig for local dev")
+        log.warning("not in cluster - loading kubeconfig for local dev")
         config.load_kube_config()
     kopf.run()
 

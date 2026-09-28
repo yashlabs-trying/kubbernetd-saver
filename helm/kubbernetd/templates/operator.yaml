@@ -30,8 +30,6 @@ spec:
               value: "{{ .Values.operator.checkInterval }}"
             - name: KUBBERNETD_METRICS_PORT
               value: "{{ .Values.operator.metricsPort }}"
-            - name: KUBBERNETD_SHADOW_PODS
-              value: "{{ .Values.operator.shadowPods }}"
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
 

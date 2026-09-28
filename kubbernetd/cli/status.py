@@ -32,7 +32,7 @@ def status():
     watched_count = 0
     try:
         crds = custom_api.list_cluster_custom_object(
-            group="kubbernetd.io", version="v1", plural="costsavers",
+            group="kubbernetd.io", version="v1", plural="replicagroups",
         )
         watched_count = len(crds.get("items", []))
     except Exception:
@@ -51,7 +51,7 @@ def status():
     else:
         table.add_row("Operator", "⚠️ not found", "Run 'kubbernetd install' first")
 
-    table.add_row("CostSaver CRDs", f"{watched_count} watched", f"{watched_count} deployment(s) being monitored")
+    table.add_row("ReplicaGroups", f"{watched_count} watched", f"{watched_count} model replica group(s) being monitored")
     table.add_row("Version", "0.1.0", "github.com/yashlabs-trying/kubbernetd-saver")
 
     is_healthy = len(operator_pods) > 0
