@@ -26,7 +26,7 @@ spec:
             - name: KUBBERNETD_IDLE_TIMEOUT
               value: "300"
             - name: KUBBERNETD_CHECK_INTERVAL
-              value: "30"
+              value: "10"
             - name: KUBBERNETD_METRICS_PORT
               value: "8080"
           resources:
