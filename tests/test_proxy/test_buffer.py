@@ -2,7 +2,6 @@ import asyncio
 import time
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
-from aiohttp import web
 from kubbernetd.proxy.buffer import RequestBuffer
 
 
@@ -11,48 +10,48 @@ def buffer():
     return RequestBuffer(max_waiters=5, request_ttl=30.0)
 
 
-class TestBuffer:
-    def test_add_waiter(self, buffer):
+class TestHold:
+    def test_hold_accepts_request(self, buffer):
         future = asyncio.get_event_loop().create_future()
-        buffer.add_waiter("default", "test-svc", future)
-        assert buffer.waiter_count("default", "test-svc") == 1
+        accepted = buffer.hold("default", "test-rg", future)
+        assert accepted is True
+        assert buffer.waiter_count("default", "test-rg") == 1
 
-    def test_max_waiters_rejects(self, buffer):
+    def test_hold_rejects_when_full(self, buffer):
         for i in range(5):
             fut = asyncio.get_event_loop().create_future()
-            buffer.add_waiter("default", "svc", fut)
+            buffer.hold("default", "rg", fut)
 
         rejected_future = asyncio.get_event_loop().create_future()
-        buffer.add_waiter("default", "svc", rejected_future)
-        assert rejected_future.done()
-        with pytest.raises(Exception, match="too many waiters"):
-            rejected_future.result()
+        accepted = buffer.hold("default", "rg", rejected_future)
+        assert accepted is False
 
-    def test_pop_waiters_returns_all(self, buffer):
-        fut1 = asyncio.get_event_loop().create_future()
-        fut2 = asyncio.get_event_loop().create_future()
-        buffer.add_waiter("default", "svc", fut1)
-        buffer.add_waiter("default", "svc", fut2)
+    def test_release_returns_entries_and_data(self, buffer):
+        future = asyncio.get_event_loop().create_future()
+        buffer.hold("default", "rg", future, ("GET", "/v1/chat", {"host": "test"}, b"hello"))
+        entries, stored = buffer.release("default", "rg")
+        assert len(entries) == 1
+        assert stored == ("GET", "/v1/chat", {"host": "test"}, b"hello")
+        assert buffer.waiter_count("default", "rg") == 0
 
-        entries = buffer.pop_waiters("default", "svc")
-        assert len(entries) == 2
-        assert buffer.waiter_count("default", "svc") == 0
+    def test_release_empty(self, buffer):
+        entries, stored = buffer.release("default", "unknown")
+        assert entries == []
+        assert stored is None
 
     def test_needs_scale_signal(self, buffer):
-        assert buffer.needs_scale_signal("default", "svc") is True
-        assert buffer.needs_scale_signal("default", "svc") is False
+        assert buffer.needs_scale_signal("default", "rg") is True
+        assert buffer.needs_scale_signal("default", "rg") is False
 
-    def test_mark_scaled_resets_signal(self, buffer):
-        buffer.needs_scale_signal("default", "svc")
-        buffer.mark_scaled("default", "svc")
-        assert buffer.needs_scale_signal("default", "svc") is True
+    def test_mark_signaled_resets(self, buffer):
+        buffer.needs_scale_signal("default", "rg")
+        buffer.mark_signaled("default", "rg")
+        assert buffer.needs_scale_signal("default", "rg") is True
 
-    def test_cleanup_expired_resolves_futures(self, buffer):
+    def test_cleanup_expired(self, buffer):
         fut = asyncio.get_event_loop().create_future()
-        buffer.add_waiter("default", "svc", fut)
-        buffer._waiters[("default", "svc")][0][1].created_at = time.monotonic() - 60
-
+        buffer.hold("default", "rg", fut)
+        buffer._holders[("default", "rg")][0][1].created_at = time.monotonic() - 60
         expired = buffer.cleanup_expired()
         assert expired == 1
-        assert buffer.waiter_count("default", "svc") == 0
-        assert fut.done()
+        assert buffer.waiter_count("default", "rg") == 0
