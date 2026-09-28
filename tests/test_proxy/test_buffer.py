@@ -5,6 +5,11 @@ from unittest.mock import Mock, patch, AsyncMock
 from kubbernetd.proxy.buffer import RequestBuffer
 
 
+def _make_future():
+    loop = asyncio.new_event_loop()
+    return loop.create_future()
+
+
 @pytest.fixture
 def buffer():
     return RequestBuffer(max_waiters=5, request_ttl=30.0)
@@ -12,22 +17,22 @@ def buffer():
 
 class TestHold:
     def test_hold_accepts_request(self, buffer):
-        future = asyncio.get_event_loop().create_future()
+        future = _make_future()
         accepted = buffer.hold("default", "test-rg", future)
         assert accepted is True
         assert buffer.waiter_count("default", "test-rg") == 1
 
     def test_hold_rejects_when_full(self, buffer):
         for i in range(5):
-            fut = asyncio.get_event_loop().create_future()
+            fut = _make_future()
             buffer.hold("default", "rg", fut)
 
-        rejected_future = asyncio.get_event_loop().create_future()
+        rejected_future = _make_future()
         accepted = buffer.hold("default", "rg", rejected_future)
         assert accepted is False
 
     def test_release_returns_entries_and_data(self, buffer):
-        future = asyncio.get_event_loop().create_future()
+        future = _make_future()
         buffer.hold("default", "rg", future, ("GET", "/v1/chat", {"host": "test"}, b"hello"))
         entries, stored = buffer.release("default", "rg")
         assert len(entries) == 1
@@ -49,7 +54,7 @@ class TestHold:
         assert buffer.needs_scale_signal("default", "rg") is True
 
     def test_cleanup_expired(self, buffer):
-        fut = asyncio.get_event_loop().create_future()
+        fut = _make_future()
         buffer.hold("default", "rg", fut)
         buffer._holders[("default", "rg")][0][1].created_at = time.monotonic() - 60
         expired = buffer.cleanup_expired()

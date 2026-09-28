@@ -192,6 +192,15 @@ class ReplicaGroupController:
     def _handle_draining(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Draining", "True", "WaitingForSequences", "draining active requests")
         self._write_status(name, namespace, state)
+        target = state.spec.get("targetRef", {}).get("name", "")
+        active = self._check_active_sequences(namespace, target)
+        drain_timeout = state.spec.get("sleepPolicy", {}).get("drainTimeout", 60)
+        start = state.stage_started_at
+        if active > 0 and now - start < drain_timeout:
+            log.info("waiting for active sequences to drain", name=name, active=active)
+            return
+        if active > 0:
+            log.warning("drain timeout reached, scaling down with active sequences", name=name, active=active)
         self._transition(name, namespace, state, GroupPhase.SCALING_DOWN)
 
     def _handle_scaling_down(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
@@ -303,6 +312,24 @@ class ReplicaGroupController:
                 label_selector=f"app={deployment_name}",
             )
             return sum(1 for p in pods.items if p.status.phase == "Running")
+        except Exception:
+            return 0
+
+    def _check_active_sequences(self, namespace: str, deployment_name: str) -> int:
+        try:
+            pods = self.core_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=f"app={deployment_name}",
+            )
+            for pod in pods.items:
+                if pod.status.phase == "Running":
+                    annotations = pod.metadata.annotations or {}
+                    val = annotations.get("kubbernetd.io/active-sequences", "0")
+                    try:
+                        return int(val)
+                    except ValueError:
+                        return 0
+            return 0
         except Exception:
             return 0
 
