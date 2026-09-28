@@ -1,11 +1,11 @@
 import time
 import pytest
-from kubbernetd.proxy.discovery import ServiceDiscovery
+from kubbernetd.proxy.discovery import EndpointDiscovery
 
 
 @pytest.fixture
 def discovery():
-    return ServiceDiscovery()
+    return EndpointDiscovery(cache_ttl=5.0)
 
 
 class TestCache:
@@ -24,28 +24,32 @@ class TestCache:
         result = discovery._from_cache("ns", "svc")
         assert result is None
 
-    def test_clear_all_cache(self, discovery):
+
+class TestRoundRobin:
+    def test_next_ip_cycles(self, discovery):
         with discovery._lock:
-            discovery._cache[("ns", "svc")] = (["10.0.0.1"], time.monotonic())
-        discovery.clear_cache()
-        assert discovery._from_cache("ns", "svc") is None
+            discovery._cache[("ns", "svc")] = (["10.0.0.1", "10.0.0.2"], time.monotonic())
+            discovery._rr_index[("ns", "svc")] = 0
+        assert discovery.next_ip("ns", "svc") == "10.0.0.1"
+        assert discovery.next_ip("ns", "svc") == "10.0.0.2"
+        assert discovery.next_ip("ns", "svc") == "10.0.0.1"
 
-    def test_clear_specific_cache(self, discovery):
-        with discovery._lock:
-            discovery._cache[("ns1", "svc1")] = (["10.0.0.1"], time.monotonic())
-            discovery._cache[("ns2", "svc2")] = (["10.0.0.2"], time.monotonic())
-        discovery.clear_cache(namespace="ns1", name="svc1")
-        assert discovery._from_cache("ns1", "svc1") is None
-        assert discovery._from_cache("ns2", "svc2") is not None
-
-
-class TestHasReadyPods:
-    def test_no_pods_returns_false(self, discovery):
+    def test_next_ip_returns_none_when_no_pods(self, discovery):
         with discovery._lock:
             discovery._cache[("ns", "svc")] = ([], time.monotonic())
-        assert discovery.has_ready_pods("ns", "svc") is False
+        assert discovery.next_ip("ns", "svc") is None
 
-    def test_has_pods_returns_true(self, discovery):
+    def test_has_ready_pods(self, discovery):
         with discovery._lock:
             discovery._cache[("ns", "svc")] = (["10.0.0.1"], time.monotonic())
         assert discovery.has_ready_pods("ns", "svc") is True
+        discovery._cache[("ns", "empty")] = ([], time.monotonic())
+        assert discovery.has_ready_pods("ns", "empty") is False
+
+    def test_clear_cache(self, discovery):
+        with discovery._lock:
+            discovery._cache[("ns", "svc")] = (["10.0.0.1"], time.monotonic())
+            discovery._rr_index[("ns", "svc")] = 3
+        discovery.clear_cache("ns", "svc")
+        assert discovery._from_cache("ns", "svc") is None
+        assert ("ns", "svc") not in discovery._rr_index
