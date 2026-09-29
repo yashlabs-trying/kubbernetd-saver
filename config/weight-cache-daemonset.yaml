@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kubbernetd-weight-cache
+  namespace: kubbernetd
+  labels:
+    app: kubbernetd-weight-cache
+spec:
+  selector:
+    matchLabels:
+      app: kubbernetd-weight-cache
+  template:
+    metadata:
+      labels:
+        app: kubbernetd-weight-cache
+    spec:
+      initContainers:
+        - name: weight-puller
+          image: huggingface/cli:latest
+          env:
+            - name: MODEL_NAME
+              value: ""
+            - name: CACHE_DIR
+              value: /cache/models
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: huggingface-token
+                  key: token
+                  optional: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              if [ -n "$MODEL_NAME" ]; then
+                echo "Pre-caching model $MODEL_NAME ..."
+                huggingface-cli download "$MODEL_NAME" --local-dir "$CACHE_DIR/$MODEL_NAME"
+                echo "Done."
+              else
+                echo "MODEL_NAME not set. No weights pre-cached."
+              fi
+          volumeMounts:
+            - name: model-cache
+              mountPath: /cache/models
+      containers:
+        - name: pause
+          image: gcr.io/google_containers/pause:latest
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: /var/cache/kubbernetd/models
+            type: DirectoryOrCreate

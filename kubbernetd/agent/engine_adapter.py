@@ -25,6 +25,10 @@ class EngineAdapter:
         self.upstream_port = upstream_port
         self._stage: str = EngineStage.STARTING
         self._probe_timeout: float = 120.0
+        self._optimizations = {}
+
+    def set_optimizations(self, opts: dict):
+        self._optimizations = opts
 
     @property
     def stage(self) -> str:
@@ -33,6 +37,12 @@ class EngineAdapter:
     async def run_progressive_checks(self):
         self._stage = EngineStage.STARTING
         self.reporter.report_stage("engine-status", EngineStage.STARTING)
+
+        eager_mode = self._optimizations.get("skip_cuda_graphs", False)
+        if eager_mode:
+            log.info("CUDA graph capture deferred - using eager mode for first request")
+            self.reporter.report_stage("cuda-optimization", "eager_mode")
+
         await asyncio.sleep(2)
 
         self._stage = EngineStage.LOADING_WEIGHTS
@@ -58,7 +68,11 @@ class EngineAdapter:
         if warmed:
             self._stage = EngineStage.READY
             self.reporter.report_stage("engine-status", EngineStage.READY)
-            log.info("engine ready after warmup")
+            if eager_mode:
+                self.reporter.report_stage("cuda-optimization", "serving_eager_graphs_async")
+                log.info("engine ready - CUDA graphs will capture asynchronously")
+            else:
+                log.info("engine ready after warmup")
         else:
             self._stage = EngineStage.ERROR
             self.reporter.report_stage("engine-status", EngineStage.ERROR)
