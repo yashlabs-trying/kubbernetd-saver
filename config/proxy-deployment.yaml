@@ -15,9 +15,17 @@ spec:
       labels:
         app: kubbernetd-proxy
     spec:
-      serviceAccountName: kubbernetd-operator
+      serviceAccountName: kubbernetd-proxy
       containers:
         - name: proxy
-          image: kubbernetd/proxy:latest
+          image: kubbernetd/proxy:ci
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          env:
+            - name: KUBBERNETD_UPSTREAM_PORT
+              value: "80"
+            - name: KUBBERNETD_REQUEST_TTL
+              value: "60"
+            - name: KUBBERNETD_UPSTREAM_TIMEOUT
+              value: "300"

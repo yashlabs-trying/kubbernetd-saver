@@ -186,8 +186,35 @@ class ReplicaGroupController:
         if state.current_workers == 0:
             self._transition(name, namespace, state, GroupPhase.SLEEPING)
             return
+        idle_seconds = self._idle_seconds(name, namespace, now)
+        if idle_seconds is None:
+            idle_seconds = now - state.stage_started_at
+        if idle_seconds > idle_timeout:
+            log.info("idle timeout reached, draining", name=name, namespace=namespace,
+                      idle_seconds=idle_seconds, timeout=idle_timeout)
+            self._transition(name, namespace, state, GroupPhase.DRAINING)
+            return
         self._set_condition(state, "Ready", "True", "Serving", f"{state.current_workers} workers running")
         self._write_status(name, namespace, state)
+
+    PROXY_ACTIVE_ANNOTATION = "kubbernetd.io/active-requests"
+
+    def _idle_seconds(self, name: str, namespace: str, now: float) -> float:
+        try:
+            rg = self.custom_api.get_namespaced_custom_object(
+                group="kubbernetd.io", version="v1",
+                namespace=namespace, plural="replicagroups",
+                name=name,
+            )
+            annotations = rg.get("metadata", {}).get("annotations", {})
+            if annotations.get(self.PROXY_ACTIVE_ANNOTATION):
+                return 0.0
+            last_req = annotations.get("kubbernetd.io/last-request-at")
+            if last_req:
+                return now - float(last_req)
+        except Exception:
+            pass
+        return None
 
     def _handle_draining(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Draining", "True", "WaitingForSequences", "draining active requests")
@@ -221,9 +248,44 @@ class ReplicaGroupController:
             log.warning("scale-down failed", name=name, error=str(e))
             self._transition(name, namespace, state, GroupPhase.ERROR)
 
+    WAKE_ANNOTATION = "kubbernetd.io/wake-desired-replicas"
+
     def _handle_sleeping(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Ready", "False", "Sleeping", "zero replicas, waiting for wake")
         self._write_status(name, namespace, state)
+        if self._wake_requested(name, namespace):
+            self._clear_wake_annotation(name, namespace)
+            self._transition(name, namespace, state, GroupPhase.ALLOCATING)
+
+    def _wake_requested(self, name: str, namespace: str) -> bool:
+        try:
+            rg = self.custom_api.get_namespaced_custom_object(
+                group="kubbernetd.io", version="v1",
+                namespace=namespace, plural="replicagroups",
+                name=name,
+            )
+            annotations = rg.get("metadata", {}).get("annotations", {})
+            return bool(annotations.get(self.WAKE_ANNOTATION))
+        except Exception:
+            return False
+
+    def _clear_wake_annotation(self, name: str, namespace: str):
+        try:
+            patch = {
+                "metadata": {
+                    "annotations": {
+                        self.WAKE_ANNOTATION: None,
+                    }
+                }
+            }
+            self.custom_api.patch_namespaced_custom_object(
+                group="kubbernetd.io", version="v1",
+                namespace=namespace, plural="replicagroups",
+                name=name,
+                body=patch,
+            )
+        except Exception as e:
+            log.warning("failed to clear wake annotation", name=name, error=str(e))
 
     def _handle_allocating(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Ready", "False", "Allocating", "scheduling GPUs and starting workers")

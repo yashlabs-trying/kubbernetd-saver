@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubbernetd-proxy
+  namespace: kubbernetd
+  labels:
+    app: kubbernetd-proxy
+spec:
+  selector:
+    app: kubbernetd-proxy
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  type: ClusterIP
