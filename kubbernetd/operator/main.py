@@ -11,8 +11,9 @@ from kubbernetd.common.types import OperatorConfig
 
 log = structlog.get_logger()
 cfg = OperatorConfig()
-metrics = MetricsExporter(cfg, skip_server=False)
-controller = ReplicaGroupController(cfg, metrics)
+
+controller: ReplicaGroupController = None
+metrics: MetricsExporter = None
 
 
 def _tick_loop():
@@ -27,13 +28,11 @@ def _tick_loop():
         loop.run_until_complete(asyncio.sleep(cfg.check_interval_seconds))
 
 
-def _resolve_target(spec, fallback_name):
-    target = spec.get("targetRef", {})
-    return target.get("name", fallback_name)
-
-
 @kopf.on.startup()
 def on_startup(**kwargs):
+    global controller, metrics
+    metrics = MetricsExporter(cfg, skip_server=False)
+    controller = ReplicaGroupController(cfg, metrics)
     controller._tick_count = 0
     thread = threading.Thread(target=_tick_loop, daemon=True, name="tick-loop")
     thread.start()
@@ -66,7 +65,7 @@ def on_resume(spec, namespace, name, **kwargs):
 
 def main():
     try:
-        config.load_incluster_client()
+        config.load_incluster_config()
     except Exception:
         log.warning("not in cluster - loading kubeconfig for local dev")
         config.load_kube_config()

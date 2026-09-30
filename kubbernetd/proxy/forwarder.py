@@ -1,3 +1,4 @@
+import asyncio
 import structlog
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 
@@ -20,7 +21,6 @@ class RequestForwarder:
 
     async def forward_streaming(self, request: web.Request, target_ip: str) -> web.StreamResponse:
         path = request.path_qs or request.path
-        url = f"http://{target_ip}:{self.upstream_port}{path}"
         body = getattr(request, "_cached_body", None)
         if body is None:
             try:
@@ -30,9 +30,53 @@ class RequestForwarder:
         headers = dict(request.headers)
         headers.pop("X-Kubbernetd-Namespace", None)
         headers.pop("X-Kubbernetd-Service", None)
+        return await self._do_forward(
+            method=request.method,
+            path=path,
+            headers=headers,
+            body=body,
+            target_ip=target_ip,
+            response_for=request,
+        )
+
+    async def forward_raw(
+        self,
+        method: str,
+        path: str,
+        headers: dict,
+        body: bytes,
+        target_ip: str,
+    ) -> tuple[int, dict, bytes]:
+        url = f"http://{target_ip}:{self.upstream_port}{path}"
+        clean_headers = dict(headers)
+        clean_headers.pop("X-Kubbernetd-Namespace", None)
+        clean_headers.pop("X-Kubbernetd-Service", None)
         try:
             async with self._session.request(
-                method=request.method,
+                method=method,
+                url=url,
+                headers=clean_headers,
+                data=body if body else None,
+            ) as resp:
+                resp_body = await resp.read()
+                return resp.status, dict(resp.headers), resp_body
+        except Exception as e:
+            log.warning("raw forward failed", url=url, error=str(e))
+            return 502, {}, b"upstream error"
+
+    async def _do_forward(
+        self,
+        method: str,
+        path: str,
+        headers: dict,
+        body: bytes,
+        target_ip: str,
+        response_for: web.Request,
+    ) -> web.StreamResponse:
+        url = f"http://{target_ip}:{self.upstream_port}{path}"
+        try:
+            async with self._session.request(
+                method=method,
                 url=url,
                 headers=headers,
                 data=body if body else None,
@@ -42,9 +86,9 @@ class RequestForwarder:
                     headers=dict(resp.headers),
                 )
                 response.content_type = resp.content_type or ""
-                await response.prepare(request)
+                await response.prepare(response_for)
                 async for chunk in resp.content.iter_chunked(65536):
-                    if request.transport is None or request.transport.is_closing():
+                    if response_for.transport is None or response_for.transport.is_closing():
                         log.debug("client disconnected, stopping forward", url=url)
                         break
                     await response.write(chunk)

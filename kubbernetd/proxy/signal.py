@@ -6,6 +6,8 @@ from kubbernetd.proxy.discovery import EndpointDiscovery
 
 log = structlog.get_logger()
 
+WAKE_ANNOTATION = "kubbernetd.io/wake-desired-replicas"
+
 
 class GroupSignaler:
     def __init__(self, discovery: EndpointDiscovery):
@@ -13,16 +15,14 @@ class GroupSignaler:
         self.discovery = discovery
         self._poll_interval = 1.0
 
-    async def ensure_ready(self, namespace: str, group: str, timeout: float = 120.0) -> bool:
-        ready_before = self.discovery.has_ready_pods(namespace, group)
+    async def ensure_ready(self, namespace: str, group: str, target_service: str, timeout: float = 120.0) -> bool:
+        ready_before = self.discovery.has_ready_pods(namespace, target_service)
         if ready_before:
             return True
-        self._signal_wake(namespace, group)
-        return await self._wait_for_readiness(namespace, group, timeout)
+        self._signal_wake(namespace, group, target_service)
+        return await self._wait_for_readiness(namespace, group, target_service, timeout)
 
-    WAKE_ANNOTATION = "kubbernetd.io/wake-desired-replicas"
-
-    def _signal_wake(self, namespace: str, group: str):
+    def _signal_wake(self, namespace: str, group: str, target_service: str):
         try:
             rg = self.custom_api.get_namespaced_custom_object(
                 group="kubbernetd.io", version="v1",
@@ -31,7 +31,7 @@ class GroupSignaler:
             )
 
             annotations = rg.get("metadata", {}).get("annotations", {})
-            if annotations.get(self.WAKE_ANNOTATION):
+            if annotations.get(WAKE_ANNOTATION):
                 log.info("wake already requested for replicagroup", group=group)
                 return
 
@@ -41,7 +41,7 @@ class GroupSignaler:
             patch = {
                 "metadata": {
                     "annotations": {
-                        self.WAKE_ANNOTATION: desired,
+                        WAKE_ANNOTATION: desired,
                     }
                 }
             }
@@ -51,9 +51,9 @@ class GroupSignaler:
                 name=group,
                 body=patch,
             )
-            self.discovery.clear_cache(namespace, group)
+            self.discovery.clear_cache(namespace, target_service)
             log.info("signaled wake for replicagroup", group=group, namespace=namespace,
-                      desired_replicas=desired)
+                      desired_replicas=desired, target_service=target_service)
         except client.exceptions.ApiException as e:
             if e.status == 404:
                 log.warning("replicagroup not found", group=group, error=str(e))
@@ -62,7 +62,7 @@ class GroupSignaler:
         except Exception as e:
             log.warning("wake signal failed unexpectedly", group=group, error=str(e))
 
-    async def _wait_for_readiness(self, namespace: str, group: str, timeout: float) -> bool:
+    async def _wait_for_readiness(self, namespace: str, group: str, target_service: str, timeout: float) -> bool:
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -83,7 +83,7 @@ class GroupSignaler:
                 pass
             except Exception as e:
                 log.warning("error checking replicagroup status", group=group, error=str(e))
-            if self.discovery.has_ready_pods(namespace, group):
+            if self.discovery.has_ready_pods(namespace, target_service):
                 return True
             await asyncio.sleep(self._poll_interval)
         log.warning("replicagroup not ready within timeout", group=group, timeout=timeout)

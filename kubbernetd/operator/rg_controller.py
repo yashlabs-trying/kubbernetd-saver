@@ -220,14 +220,14 @@ class ReplicaGroupController:
         self._set_condition(state, "Draining", "True", "WaitingForSequences", "draining active requests")
         self._write_status(name, namespace, state)
         target = state.spec.get("targetRef", {}).get("name", "")
-        active = self._check_active_sequences(namespace, target)
+        active = self._has_active_proxy_requests(name, namespace)
         drain_timeout = state.spec.get("sleepPolicy", {}).get("drainTimeout", 60)
         start = state.stage_started_at
-        if active > 0 and now - start < drain_timeout:
-            log.info("waiting for active sequences to drain", name=name, active=active)
+        if active and now - start < drain_timeout:
+            log.info("waiting for proxy active-requests to drain", name=name, namespace=namespace)
             return
-        if active > 0:
-            log.warning("drain timeout reached, scaling down with active sequences", name=name, active=active)
+        if active:
+            log.warning("drain timeout reached, scaling down with active requests", name=name, namespace=namespace)
         self._transition(name, namespace, state, GroupPhase.SCALING_DOWN)
 
     def _handle_scaling_down(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
@@ -320,21 +320,24 @@ class ReplicaGroupController:
     def _handle_loading_weights(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Ready", "False", "LoadingWeights", "loading model shards to GPU")
         self._write_status(name, namespace, state)
-        all_loaded = self._check_agent_annotation(namespace, state.spec.get("targetRef", {}).get("name", ""), "kubbernetd.io/weight-status", "loaded")
+        target = state.spec.get("targetRef", {}).get("name", "")
+        all_loaded = self._agent_annotation_or_skip(namespace, target, "kubbernetd.io/weight-status", "loaded")
         if all_loaded:
             state.wake_stages.weightLoading = time.monotonic() - state.stage_started_at
             self._transition(name, namespace, state, GroupPhase.INITIALIZING)
 
     def _handle_initializing(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Ready", "False", "Initializing", "CUDA + NCCL + engine init")
-        cuda_ready = self._check_agent_annotation(namespace, state.spec.get("targetRef", {}).get("name", ""), "kubbernetd.io/cuda-status", "ready")
-        nccl_ready = self._check_agent_annotation(namespace, state.spec.get("targetRef", {}).get("name", ""), "kubbernetd.io/nccl-status", "ready")
+        target = state.spec.get("targetRef", {}).get("name", "")
+        cuda_ready = self._agent_annotation_or_skip(namespace, target, "kubbernetd.io/cuda-status", "ready")
+        nccl_ready = self._agent_annotation_or_skip(namespace, target, "kubbernetd.io/nccl-status", "ready")
         if cuda_ready and nccl_ready:
             self._transition(name, namespace, state, GroupPhase.WARMING)
 
     def _handle_warming(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Ready", "False", "Warming", "running warmup probe")
-        engine_ready = self._check_agent_annotation(namespace, state.spec.get("targetRef", {}).get("name", ""), "kubbernetd.io/engine-status", "ready")
+        target = state.spec.get("targetRef", {}).get("name", "")
+        engine_ready = self._agent_annotation_or_skip(namespace, target, "kubbernetd.io/engine-status", "ready")
         if engine_ready:
             state.wake_stages.warmup = time.monotonic() - state.stage_started_at
             elapsed = time.monotonic() - state.wake_started_at
@@ -377,6 +380,18 @@ class ReplicaGroupController:
         except Exception:
             return 0
 
+    def _has_active_proxy_requests(self, name: str, namespace: str) -> bool:
+        try:
+            rg = self.custom_api.get_namespaced_custom_object(
+                group="kubbernetd.io", version="v1",
+                namespace=namespace, plural="replicagroups",
+                name=name,
+            )
+            annotations = rg.get("metadata", {}).get("annotations", {})
+            return bool(annotations.get(self.PROXY_ACTIVE_ANNOTATION))
+        except Exception:
+            return False
+
     def _check_active_sequences(self, namespace: str, deployment_name: str) -> int:
         try:
             pods = self.core_api.list_namespaced_pod(
@@ -395,18 +410,34 @@ class ReplicaGroupController:
         except Exception:
             return 0
 
-    def _check_agent_annotation(self, namespace: str, deployment_name: str, annotation_key: str, expected: str) -> bool:
+    def _agent_annotation_or_skip(self, namespace: str, deployment_name: str, annotation_key: str, expected: str) -> bool:
         try:
             pods = self.core_api.list_namespaced_pod(
                 namespace=namespace,
                 label_selector=f"app={deployment_name}",
             )
+            if not pods.items:
+                return False
+            all_running = True
+            any_annotation = False
             for pod in pods.items:
                 if pod.status.phase != "Running":
-                    return False
+                    all_running = False
+                    continue
+                annotations = pod.metadata.annotations or {}
+                val = annotations.get(annotation_key)
+                if val is not None:
+                    any_annotation = True
+                    if val != expected:
+                        return False
+            if not all_running:
+                return False
+            if not any_annotation:
+                return True
+            for pod in pods.items:
                 annotations = pod.metadata.annotations or {}
                 if annotations.get(annotation_key) != expected:
                     return False
-            return len(pods.items) > 0
+            return True
         except Exception:
             return False
