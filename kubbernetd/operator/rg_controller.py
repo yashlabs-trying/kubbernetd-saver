@@ -63,7 +63,22 @@ class ReplicaGroupController:
 
     def remove_group(self, name: str, namespace: str):
         with self._lock:
-            self._groups.pop((name, namespace), None)
+            state = self._groups.pop((name, namespace), None)
+        if state is not None and state.current_workers == 0:
+            target = state.spec.get("targetRef", {}).get("name", "")
+            if target:
+                spec_model = state.spec.get("model", {})
+                restore = spec_model.get("workers", 1)
+                try:
+                    self.apps_api.patch_namespaced_deployment_scale(
+                        name=target, namespace=namespace,
+                        body={"spec": {"replicas": restore}},
+                    )
+                    log.info("restored deployment replicas on rg deletion",
+                              name=target, namespace=namespace, replicas=restore)
+                except Exception as e:
+                    log.warning("failed to restore deployment replicas on rg deletion",
+                                 name=target, error=str(e))
         log.info("removed replicagroup", name=name, namespace=namespace)
 
     def update_group(self, name: str, namespace: str, spec: dict):

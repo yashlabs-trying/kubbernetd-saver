@@ -1,3 +1,4 @@
+import asyncio
 import aiohttp
 import structlog
 
@@ -24,6 +25,11 @@ async def probe_model_readiness(host: str, port: int = 8080, timeout: float = 30
                 body = await resp.text()
                 log.warning("model readiness probe failed", url=url, status=resp.status, body=body[:200])
                 return False
-    except (aiohttp.ClientError, TimeoutError, ConnectionError) as e:
+    except (
+        aiohttp.ClientError,
+        asyncio.TimeoutError,
+        TimeoutError,
+        ConnectionError,
+    ) as e:
         log.warning("model readiness probe connection failed", url=url, error=str(e))
         return False

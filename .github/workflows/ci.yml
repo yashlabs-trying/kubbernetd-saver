@@ -115,6 +115,15 @@ jobs:
           kubectl wait --for=condition=available deployment/kubbernetd-proxy -n kubbernetd --timeout=60s
           echo "Proxy ready"
 
+      - name: Clean-install smoke test
+        run: |
+          echo "=== Clean install smoke test ==="
+          kubbernetd install --namespace kubbernetd 2>&1
+          kubectl get crd replicagroups.kubbernetd.io -o name
+          kubectl get namespace kubbernetd
+          kubectl get deployment kubbernetd-operator -n kubbernetd
+          echo "Install smoke test passed"
+
       - name: Deploy test model (nginx)
         run: |
           kubectl create deployment test-model --image=nginx --replicas=1 --port=80
