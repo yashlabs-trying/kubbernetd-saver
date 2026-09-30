@@ -184,3 +184,6 @@ spec:
                 requestLoss:
                   type: integer
                   default: 0
+                wakeCount:
+                  type: integer
+                  default: 0

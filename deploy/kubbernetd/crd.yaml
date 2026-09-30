@@ -80,3 +80,4 @@ spec:
                 lastWakeDuration: {type: number}
                 gpuHoursSaved: {type: number}
                 requestLoss: {type: integer}
+                wakeCount: {type: integer, default: 0}

@@ -118,6 +118,7 @@ class ReplicaGroupStatus:
     lastWakeStages: WakeStages = field(default_factory=WakeStages)
     gpuHoursSaved: float = 0.0
     requestLoss: int = 0
+    wakeCount: int = 0
 
 
 @dataclass
