@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-model
+  namespace: default
+  labels:
+    app: test-model
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-model
+  template:
+    metadata:
+      labels:
+        app: test-model
+    spec:
+      containers:
+        - name: model
+          image: nvcr.io/nvidia/tritonserver:24.08-trtllm-python-py3
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+          ports:
+            - containerPort: 8000
+              name: http
