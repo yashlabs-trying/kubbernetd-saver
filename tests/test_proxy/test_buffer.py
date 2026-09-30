@@ -34,15 +34,14 @@ class TestHold:
     def test_release_returns_entries_and_data(self, buffer):
         future = _make_future()
         buffer.hold("default", "rg", future, ("GET", "/v1/chat", {"host": "test"}, b"hello"))
-        entries, stored = buffer.release("default", "rg")
+        entries = buffer.release("default", "rg")
         assert len(entries) == 1
-        assert stored == ("GET", "/v1/chat", {"host": "test"}, b"hello")
+        assert entries[0][1].request_data == ("GET", "/v1/chat", {"host": "test"}, b"hello")
         assert buffer.waiter_count("default", "rg") == 0
 
     def test_release_empty(self, buffer):
-        entries, stored = buffer.release("default", "unknown")
+        entries = buffer.release("default", "unknown")
         assert entries == []
-        assert stored is None
 
     def test_needs_scale_signal(self, buffer):
         assert buffer.needs_scale_signal("default", "rg") is True
