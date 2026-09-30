@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubbernetd-proxy
+  namespace: kubbernetd
+  labels:
+    app: kubbernetd-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubbernetd-proxy
+  template:
+    metadata:
+      labels:
+        app: kubbernetd-proxy
+    spec:
+      serviceAccountName: kubbernetd-operator
+      containers:
+        - name: proxy
+          image: ghcr.io/kubbernetd/proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: KUBBERNETD_UPSTREAM_PORT
+              value: "8000"
+            - name: KUBBERNETD_REQUEST_TTL
+              value: "30"

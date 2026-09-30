@@ -1,0 +1,30 @@
+apiVersion: kubbernetd.io/v1
+kind: ReplicaGroup
+metadata:
+  name: test-model-rg
+  namespace: default
+spec:
+  model:
+    name: test-model
+    engine: vLLM
+    precision: bf16
+    tensorParallel: 1
+    pipelineParallel: 1
+    gpuPerWorker: 1
+    workers: 1
+    weightShards: 1
+  weightCache:
+    nodeNVMe: false
+    cpuRAM: false
+    gpuVRAM: false
+  targetRef:
+    kind: Deployment
+    name: test-model
+  wakeSLO: 30
+  coldStartTimeout: 180
+  bootstrap:
+    enabled: false
+  sleepPolicy:
+    sleepDepth: full
+    idleTimeout: 120
+    activeSequenceThreshold: 0
