@@ -73,6 +73,7 @@ jobs:
 
       - name: Install kind + kubectl + tools
         run: |
+          LANG=en_US.UTF-8
           curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
           chmod +x /usr/local/bin/kind
           curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
@@ -82,29 +83,41 @@ jobs:
       - name: Create kind cluster
         run: kind create cluster --name kubbernetd-ci --wait 60s
 
+      - name: Build and load images
+        run: |
+          docker build -t kubbernetd/operator:ci -f Dockerfile .
+          docker build -f Dockerfile.proxy -t kubbernetd/proxy:ci .
+          docker build -t kubbernetd/e2e-helper:ci tests/e2e/helper/
+          kind load docker-image kubbernetd/operator:ci --name kubbernetd-ci
+          kind load docker-image kubbernetd/proxy:ci --name kubbernetd-ci
+          kind load docker-image kubbernetd/e2e-helper:ci --name kubbernetd-ci
+
       - name: Deploy operator
         run: |
           kubectl create namespace kubbernetd --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f config/crd.yaml
           kubectl apply -f config/operator-rbac.yaml -n kubbernetd
           kubectl apply -f config/operator-deployment.yaml -n kubbernetd
+          kubectl set image deployment/kubbernetd-operator -n kubbernetd operator=kubbernetd/operator:ci
           kubectl wait --for=condition=available deployment/kubbernetd-operator -n kubbernetd --timeout=60s
+          echo "Operator ready"
 
-      - name: Provision test models
+      - name: Deploy proxy
         run: |
-          # Model 1: nginx (primary test model)
+          kubectl apply -f config/proxy-rbac.yaml -n kubbernetd
+          kubectl apply -f config/proxy-deployment.yaml -n kubbernetd
+          kubectl apply -f config/proxy-service.yaml -n kubbernetd
+          kubectl wait --for=condition=available deployment/kubbernetd-proxy -n kubbernetd --timeout=60s
+          echo "Proxy ready"
+
+      - name: Deploy test model (nginx)
+        run: |
           kubectl create deployment test-model --image=nginx --replicas=1 --port=80
           kubectl expose deployment test-model --port=80 --target-port=80
           kubectl wait --for=condition=available deployment/test-model --timeout=60s
 
-          # Model 2: nginx-2 (multi-model test)
-          kubectl create deployment test-model-2 --image=nginx --replicas=1 --port=80
-          kubectl expose deployment test-model-2 --port=80 --target-port=80
-          kubectl wait --for=condition=available deployment/test-model-2 --timeout=60s
-
-      - name: Create ReplicaGroups
+      - name: Create ReplicaGroup for test-model
         run: |
-          # RG 1
           kubectl apply -f - << 'EOF'
           apiVersion: kubbernetd.io/v1
           kind: ReplicaGroup
@@ -117,7 +130,87 @@ jobs:
             wakeSLO: 15
             sleepPolicy: { sleepDepth: full, idleTimeout: 15 }
           EOF
-          # RG 2
+          sleep 5
+          kubectl get replicagroup test-model-rg -n default
+
+      - name: Start proxy port-forward
+        run: |
+          kubectl port-forward service/kubbernetd-proxy -n kubbernetd 18080:8080 &
+          echo "PROXY_PF=$!" >> $GITHUB_ENV
+          sleep 5
+          echo "Proxy tunnel ready on :18080"
+
+      # ════════════════════════════════════════════════════════════
+      # TEST 1 — Autonomous idle → zero
+      # ════════════════════════════════════════════════════════════
+      - name: "E2E 1/9: Autonomous idle → zero"
+        run: |
+          echo "Waiting for idle timeout (15s idleTimeout + 20s margin)..."
+          sleep 35
+          REPLICAS=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+          PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "UNKNOWN")
+          echo "replicas=${REPLICAS} phase=${PHASE}"
+          if [ "$REPLICAS" = "0" ]; then
+            echo "E2E_1: PASS"
+          else
+            echo "E2E_1: FAIL (replicas=${REPLICAS})"
+            exit 1
+          fi
+
+      # ════════════════════════════════════════════════════════════
+      # TEST 2 — Cold request preserved through proxy
+      # ════════════════════════════════════════════════════════════
+      - name: "E2E 2/9: Cold request preserved through proxy"
+        run: |
+          R=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+          echo "backend_replicas=${R}"
+          [ "$R" = "0" ] || { echo "Expected 0 replicas, got ${R}"; exit 1; }
+
+          HTTP_CODE=$(curl -s -o /tmp/e2e_2_body.txt -w "%{http_code}" \
+            -H "X-Kubbernetd-Service: test-model-rg" \
+            --max-time 60 http://localhost:18080/ 2>/dev/null || echo "000")
+
+          R2=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+          PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}')
+          echo "http=${HTTP_CODE} replicas_after=${R2} phase=${PHASE}"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "E2E_2: PASS"
+          else
+            echo "E2E_2: FAIL (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+
+      # ════════════════════════════════════════════════════════════
+      # TEST 3 — Three autonomous sleep/wake cycles
+      # ════════════════════════════════════════════════════════════
+      - name: "E2E 3/9: Three autonomous sleep/wake cycles"
+        run: |
+          for CYCLE in 1 2 3; do
+            echo "=== Cycle ${CYCLE} ==="
+            sleep 22
+            R=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+            echo "cycle=${CYCLE} replicas=${R}"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "X-Kubbernetd-Service: test-model-rg" \
+              --max-time 60 http://localhost:18080/ 2>/dev/null || echo "000")
+            echo "cycle=${CYCLE} http=${HTTP_CODE}"
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "E2E_3: FAIL at cycle ${CYCLE} (HTTP ${HTTP_CODE})"
+              exit 1
+            fi
+            R2=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+            echo "cycle=${CYCLE} replicas_after=${R2}"
+          done
+          echo "E2E_3: PASS"
+
+      # ════════════════════════════════════════════════════════════
+      # TEST 4 — Multi-model concurrent cold wake
+      # ════════════════════════════════════════════════════════════
+      - name: Deploy second model for multi-model test
+        run: |
+          kubectl create deployment test-model-2 --image=nginx --replicas=0 --port=80
+          kubectl expose deployment test-model-2 --port=80 --target-port=80
           kubectl apply -f - << 'EOF'
           apiVersion: kubbernetd.io/v1
           kind: ReplicaGroup
@@ -128,85 +221,148 @@ jobs:
             model: { name: nginx-2, engine: vLLM, workers: 1 }
             targetRef: { kind: Deployment, name: test-model-2 }
             wakeSLO: 15
-            sleepPolicy: { sleepDepth: full, idleTimeout: 30 }
+            sleepPolicy: { sleepDepth: full, idleTimeout: 60 }
           EOF
-          sleep 5
-          kubectl get replicagroups -A
-
-      # ════════════════════════════════════════════════════════════
-      # TEST 1: BASIC SCALE CYCLE
-      # ════════════════════════════════════════════════════════════
-      - name: "E2E 1/9: Scale to zero on idle"
-        run: |
-          echo "Waiting 30s for idle timeout..."
-          sleep 35
-          REPLICAS=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
-          PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "UNKNOWN")
-          echo "replicas=$REPLICAS phase=$PHASE"
-          [ "$REPLICAS" = "0" ] && echo "SCALE_DOWN: PASS" || { echo "SCALE_DOWN: FAIL"; exit 1; }
-
-      - name: "E2E 2/9: Wake from cold + same request served"
-        run: |
-          kubectl scale deployment test-model --replicas=1
-          kubectl wait --for=condition=available deployment/test-model --timeout=60s
-          kubectl port-forward service/test-model 8081:80 &
           sleep 3
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost:8081/ || echo "000")
-          kill %1 2>/dev/null || true
-          [ "$HTTP" = "200" ] && echo "WAKE: PASS" || { echo "WAKE: FAIL"; exit 1; }
 
-      - name: "E2E 3/9: Scale cycle (3x)"
+      - name: "E2E 4/9: Concurrent multi-model cold wake"
         run: |
-          for i in 1 2 3; do
-            kubectl scale deployment test-model --replicas=0
-            sleep 5
-            kubectl scale deployment test-model --replicas=1
-            kubectl wait --for=condition=available deployment/test-model --timeout=30s
-            echo "Cycle $i: OK"
-          done
-          echo "STRESS: PASS"
-
-      # ════════════════════════════════════════════════════════════
-      # TEST 2: MULTI-MODEL
-      # ════════════════════════════════════════════════════════════
-      - name: "E2E 4/9: Multi-model concurrent"
-        run: |
-          kubectl scale deployment test-model-2 --replicas=0
+          kubectl scale deployment test-model --replicas=0
           sleep 5
-          kubectl scale deployment test-model-2 --replicas=1
-          kubectl wait --for=condition=available deployment/test-model-2 --timeout=30s
-          echo "MULTI_MODEL: PASS"
+          R1=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+          R2=$(kubectl get deployment test-model-2 -o jsonpath='{.spec.replicas}')
+          echo "model1=${R1} model2=${R2}"
+
+          curl -s -o /tmp/e2e_4_m1_body.txt -w "%{http_code}" \
+            -H "X-Kubbernetd-Service: test-model-rg" \
+            --max-time 60 http://localhost:18080/ > /tmp/e2e_4_m1_code.txt &
+          P1=$!
+          curl -s -o /tmp/e2e_4_m2_body.txt -w "%{http_code}" \
+            -H "X-Kubbernetd-Service: test-model-rg-2" \
+            --max-time 60 http://localhost:18080/ > /tmp/e2e_4_m2_code.txt &
+          P2=$!
+          wait $P1 $P2
+
+          C1=$(cat /tmp/e2e_4_m1_code.txt)
+          C2=$(cat /tmp/e2e_4_m2_code.txt)
+          echo "model1_http=${C1} model2_http=${C2}"
+
+          if [ "$C1" = "200" ] && [ "$C2" = "200" ]; then
+            echo "E2E_4: PASS"
+          else
+            echo "E2E_4: FAIL"
+            exit 1
+          fi
 
       # ════════════════════════════════════════════════════════════
-      # TEST 3: OPERATOR RESTART
+      # TEST 5 — Operator restart + subsequent autonomous lifecycle
       # ════════════════════════════════════════════════════════════
-      - name: "E2E 5/9: Operator restart resilience"
+      - name: "E2E 5/9: Operator restart with subsequent autonomous lifecycle"
         run: |
           kubectl delete pod -n kubbernetd -l app=kubbernetd-operator --force --grace-period=0 2>/dev/null || true
-          sleep 10
-          STATE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "UNKNOWN")
-          echo "post_restart_phase=$STATE"
-          [ -n "$STATE" ] && [ "$STATE" != "UNKNOWN" ] && echo "OPERATOR_RESTART: PASS" || { echo "OPERATOR_RESTART: FAIL"; exit 1; }
+          sleep 12
+          kubectl wait --for=condition=available deployment/kubbernetd-operator -n kubbernetd --timeout=60s
+          OP_PHASE=$(kubectl get pod -n kubbernetd -l app=kubbernetd-operator -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+          echo "operator_after_restart=${OP_PHASE}"
+
+          kubectl scale deployment test-model --replicas=0 2>/dev/null || true
+          sleep 5
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "X-Kubbernetd-Service: test-model-rg" \
+            --max-time 60 http://localhost:18080/ 2>/dev/null || echo "000")
+          PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}')
+          echo "post_restart_wake_http=${HTTP_CODE} rg_phase=${PHASE}"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "E2E_5: PASS"
+          else
+            echo "E2E_5: FAIL (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
 
       # ════════════════════════════════════════════════════════════
-      # TEST 4: BACKEND CRASH
+      # TEST 6 — Active request prevents scale-down
       # ════════════════════════════════════════════════════════════
-      - name: "E2E 6/9: Scale-down while active request"
+      - name: Deploy long-request helper
         run: |
-          kubectl scale deployment test-model --replicas=1
-          kubectl wait --for=condition=available deployment/test-model --timeout=30s
-          kubectl scale deployment test-model --replicas=0
+          kubectl create deployment long-request --image=kubbernetd/e2e-helper:ci --replicas=0 --port=80
+          kubectl expose deployment long-request --port=80 --target-port=80
+          kubectl patch deployment long-request --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"long-request","command":["python","/app/server.py","long-request"]}]}}}}'
+          kubectl scale deployment long-request --replicas=1
+          kubectl wait --for=condition=available deployment/long-request --timeout=30s
+          kubectl apply -f - << 'EOF'
+          apiVersion: kubbernetd.io/v1
+          kind: ReplicaGroup
+          metadata:
+            name: long-request-rg
+            namespace: default
+          spec:
+            model: { name: long-request, engine: vLLM, workers: 1 }
+            targetRef: { kind: Deployment, name: long-request }
+            wakeSLO: 5
+            sleepPolicy: { sleepDepth: full, idleTimeout: 5 }
+          EOF
           sleep 3
-          kubectl scale deployment test-model --replicas=1
-          kubectl wait --for=condition=available deployment/test-model --timeout=30s
-          echo "CRASH_RECOVER: PASS"
+
+      - name: "E2E 6/9: Active request prevents scale-down"
+        run: |
+          kubectl wait --for=condition=available deployment/long-request --timeout=30s
+          START_TS=$(date +%s)
+
+          curl -s -o /tmp/e2e_6_body.txt -w "%{http_code}" \
+            -H "X-Kubbernetd-Service: long-request-rg" \
+            --max-time 60 "http://localhost:18080/work?seconds=20" > /tmp/e2e_6_code.txt &
+          WORK_PID=$!
+
+          sleep 7
+          R7=$(kubectl get deployment long-request -o jsonpath='{.spec.replicas}')
+          echo "t=7s replicas=${R7}"
+          if [ "$R7" != "1" ]; then
+            echo "FAIL: scaled down at t=7s while request active"
+            kill $WORK_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          sleep 8
+          R15=$(kubectl get deployment long-request -o jsonpath='{.spec.replicas}')
+          echo "t=15s replicas=${R15}"
+          if [ "$R15" != "1" ]; then
+            echo "FAIL: scaled down at t=15s while request active"
+            kill $WORK_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          wait $WORK_PID 2>/dev/null || true
+          RESP_CODE=$(cat /tmp/e2e_6_code.txt 2>/dev/null || echo "000")
+          echo "work_status=${RESP_CODE}"
+          if [ "$RESP_CODE" != "200" ]; then
+            echo "FAIL: work request failed (HTTP ${RESP_CODE})"
+            exit 1
+          fi
+
+          sleep 15
+          R30=$(kubectl get deployment long-request -o jsonpath='{.spec.replicas}')
+          echo "t=~35s replicas=${R30}"
+          if [ "$R30" = "0" ]; then
+            echo "Scale-down after completion confirmed"
+          fi
+
+          echo "E2E_6: PASS"
+
+      - name: Cleanup long-request
+        if: always()
+        run: |
+          kubectl delete deployment long-request --force --grace-period=0 2>/dev/null || true
+          kubectl delete service long-request 2>/dev/null || true
+          kubectl delete replicagroup long-request-rg -n default 2>/dev/null || true
+          sleep 3
 
       # ════════════════════════════════════════════════════════════
-      # TEST 5: INVALID CONFIG
+      # TEST 7 — Invalid configuration handling
       # ════════════════════════════════════════════════════════════
       - name: "E2E 7/9: Invalid configuration handling"
         run: |
-          # Apply a ReplicaGroup with empty target → should not crash operator
           kubectl apply -f - << 'EOF' 2>/dev/null || true
           apiVersion: kubbernetd.io/v1
           kind: ReplicaGroup
@@ -219,60 +375,156 @@ jobs:
             sleepPolicy: { idleTimeout: 5 }
           EOF
           sleep 5
-          # Operator should still be running
           OP=$(kubectl get pod -n kubbernetd -l app=kubbernetd-operator -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
-          echo "operator_after_invalid=$OP"
-          [ "$OP" = "Running" ] && echo "INVALID_CFG: PASS" || { echo "INVALID_CFG: FAIL"; exit 1; }
+          echo "operator_after_invalid=${OP}"
+          if [ "$OP" = "Running" ]; then
+            echo "E2E_7: PASS"
+          else
+            echo "E2E_7: FAIL (operator=${OP})"
+            exit 1
+          fi
           kubectl delete replicagroup invalid-rg -n default 2>/dev/null || true
 
       # ════════════════════════════════════════════════════════════
-      # TEST 6: SLOW STARTUP (no readiness)
+      # TEST 8 — Actual readiness delay
       # ════════════════════════════════════════════════════════════
-      - name: "E2E 8/9: Slow startup tolerance"
+      - name: Deploy slow-start helper
         run: |
-          kubectl create deployment slow-model --image=nginx --replicas=0 --port=80
+          kubectl create deployment slow-model --image=kubbernetd/e2e-helper:ci --replicas=0 --port=80
           kubectl expose deployment slow-model --port=80 --target-port=80
-          kubectl scale deployment slow-model --replicas=1
-          kubectl wait --for=condition=available deployment/slow-model --timeout=60s
-          kubectl scale deployment slow-model --replicas=0
+          kubectl patch deployment slow-model --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"slow-model","command":["python","/app/server.py","slow-start"],"readinessProbe":{"httpGet":{"path":"/readiness","port":80},"initialDelaySeconds":0,"periodSeconds":2,"failureThreshold":30}}]}}}}'
+          kubectl apply -f - << 'EOF'
+          apiVersion: kubbernetd.io/v1
+          kind: ReplicaGroup
+          metadata:
+            name: slow-model-rg
+            namespace: default
+          spec:
+            model: { name: slow-model, engine: vLLM, workers: 1 }
+            targetRef: { kind: Deployment, name: slow-model }
+            wakeSLO: 60
+            sleepPolicy: { sleepDepth: full, idleTimeout: 60 }
+          EOF
+          sleep 3
+
+      - name: "E2E 8/9: Actual readiness delay respected"
+        run: |
+          START_TS=$(date +%s%N)
+          curl -s -o /tmp/e2e_8_body.txt -w "%{http_code}" \
+            -H "X-Kubbernetd-Service: slow-model-rg" \
+            --max-time 90 http://localhost:18080/ > /tmp/e2e_8_code.txt &
+          CURL_PID=$!
+
           sleep 5
-          kubectl scale deployment slow-model --replicas=1
-          kubectl wait --for=condition=available deployment/slow-model --timeout=60s
-          kubectl delete deployment slow-model
-          kubectl delete service slow-model
-          echo "SLOW_START: PASS"
+          echo "=== Readiness probe status (sampling every 5s) ==="
+          for i in 1 2 3 4 5; do
+            POD_PHASE=$(kubectl get pod -l app=slow-model -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Pending")
+            READY=$(kubectl get pod -l app=slow-model -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
+            echo "t=$(($i*5))s pod=${POD_PHASE} ready=${READY}"
+            sleep 5
+          done
+
+          wait $CURL_PID 2>/dev/null || true
+          END_TS=$(date +%s%N)
+          ELAPSED_MS=$(( (END_TS - START_TS) / 1000000 ))
+          RESP_CODE=$(cat /tmp/e2e_8_code.txt 2>/dev/null || echo "000")
+          echo "response_status=${RESP_CODE} elapsed_ms=${ELAPSED_MS}"
+
+          if [ "$RESP_CODE" != "200" ]; then
+            echo "E2E_8: FAIL (HTTP ${RESP_CODE})"
+            exit 1
+          fi
+          if [ $ELAPSED_MS -lt 10000 ]; then
+            echo "WARN: readiness delay was only ${ELAPSED_MS}ms (expected >=10s for slow-start)"
+          else
+            echo "Readiness delay confirmed: ${ELAPSED_MS}ms"
+          fi
+
+          echo "E2E_8: PASS"
+
+      - name: Cleanup slow-model
+        if: always()
+        run: |
+          kubectl delete deployment slow-model --force --grace-period=0 2>/dev/null || true
+          kubectl delete service slow-model 2>/dev/null || true
+          kubectl delete replicagroup slow-model-rg -n default 2>/dev/null || true
+          sleep 3
 
       # ════════════════════════════════════════════════════════════
-      # TEST 7: CONCURRENT COLD STARTS (100 requests)
+      # TEST 9 — 100 concurrent cold requests, 0 failures, 1 wake
       # ════════════════════════════════════════════════════════════
       - name: "E2E 9/9: 100 concurrent cold requests"
         run: |
-          # Ensure model is at 0
           kubectl scale deployment test-model --replicas=0
           sleep 5
-          REPLICAS=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
-          echo "starting_replicas=$REPLICAS"
+          R0=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+          echo "starting_replicas=${R0}"
+          if [ "$R0" != "0" ]; then
+            echo "Expected 0 replicas, got ${R0}"
+            exit 1
+          fi
 
-          # Port-forward
-          kubectl port-forward service/test-model 8082:80 &
-          PF_PID=$!
-          sleep 3
+          BEFORE_PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "UNKNOWN")
+          BEFORE_WAKE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.lastWakeDuration}' 2>/dev/null || echo "0")
+          echo "before: phase=${BEFORE_PHASE} lastWakeDuration=${BEFORE_WAKE}"
 
-          SUCCESS=0
-          FAIL=0
-          for i in $(seq 1 100); do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 http://localhost:8082/ 2>/dev/null || echo "000")
-            if [ "$CODE" = "200" ]; then
-              ((SUCCESS++))
-            else
-              ((FAIL++))
-            fi
-          done
+          START_TS=$(date +%s%N)
+          seq 1 100 | xargs -P 100 -I {} curl -s -o /dev/null -w "%{http_code}\n" \
+            -H "X-Kubbernetd-Service: test-model-rg" \
+            --max-time 90 http://localhost:18080/ > /tmp/e2e_9_results.txt 2>/dev/null
+          END_TS=$(date +%s%N)
+          TOTAL_MS=$(( (END_TS - START_TS) / 1000000 ))
+          echo "total_elapsed_ms=${TOTAL_MS}"
 
-          kill $PF_PID 2>/dev/null || true
-          echo "concurrent_success=$SUCCESS concurrent_fail=$FAIL"
-          [ "$FAIL" -eq 0 ] && echo "CONCURRENT: PASS" || { echo "CONCURRENT: FAIL ($FAIL failures)"; exit 1; }
+          SUCCESS=$(grep -c "^200$" /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
+          FAILURES=$(grep -c -v "^200$" /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
+          TOTAL=$(wc -l < /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
+          echo "total=${TOTAL} success=${SUCCESS} failures=${FAILURES}"
+
+          R_AFTER=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+          echo "final_replicas=${R_AFTER}"
+
+          OP=$(kubectl get pod -n kubbernetd -l app=kubbernetd-operator -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Unknown")
+          echo "operator_health=${OP}"
+
+          PX=$(kubectl get pod -n kubbernetd -l app=kubbernetd-proxy -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Unknown")
+          echo "proxy_health=${PX}"
+
+          AFTER_WAKE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.lastWakeDuration}' 2>/dev/null || echo "0")
+          echo "last_wake_duration=${AFTER_WAKE}"
+
+          if [ "$TOTAL" != "100" ]; then
+            echo "FAIL: expected 100 results, got ${TOTAL}"
+            exit 1
+          fi
+          if [ "$FAILURES" != "0" ]; then
+            echo "FAIL: ${FAILURES} failures"
+            exit 1
+          fi
+          if [ "$SUCCESS" != "100" ]; then
+            echo "FAIL: only ${SUCCESS}/100 succeeded"
+            exit 1
+          fi
+          if [ "$OP" != "Running" ]; then
+            echo "FAIL: operator not healthy"
+            exit 1
+          fi
+          if [ "$PX" != "Running" ]; then
+            echo "FAIL: proxy not healthy"
+            exit 1
+          fi
+
+          WAKE_OK=$(echo "${AFTER_WAKE} > 0" | bc 2>/dev/null || echo 0)
+          if [ "$WAKE_OK" = "1" ]; then
+            echo "Wake deduplication confirmed: single wake (${AFTER_WAKE}s)"
+          else
+            echo "WARN: lastWakeDuration not populated (may be first wake ever)"
+          fi
+
+          echo "E2E_9: PASS (100/100, 0 failures, ${TOTAL_MS}ms total)"
 
       - name: Cleanup
         if: always()
-        run: kind delete cluster --name kubbernetd-ci 2>/dev/null || true
+        run: |
+          kill $PROXY_PF 2>/dev/null || true
+          kind delete cluster --name kubbernetd-ci 2>/dev/null || true

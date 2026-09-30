@@ -9,7 +9,6 @@ log = structlog.get_logger()
 
 class GroupSignaler:
     def __init__(self, discovery: EndpointDiscovery):
-        self.apps_api = client.AppsV1Api()
         self.custom_api = client.CustomObjectsApi()
         self.discovery = discovery
         self._poll_interval = 1.0
@@ -21,6 +20,8 @@ class GroupSignaler:
         self._signal_wake(namespace, group)
         return await self._wait_for_readiness(namespace, group, timeout)
 
+    WAKE_ANNOTATION = "kubbernetd.io/wake-desired-replicas"
+
     def _signal_wake(self, namespace: str, group: str):
         try:
             rg = self.custom_api.get_namespaced_custom_object(
@@ -28,27 +29,34 @@ class GroupSignaler:
                 namespace=namespace, plural="replicagroups",
                 name=group,
             )
-            spec = rg.get("spec", {})
-            target = spec.get("targetRef", {})
-            deployment_name = target.get("name", group)
 
-            dep = self.apps_api.read_namespaced_deployment(name=deployment_name, namespace=namespace)
-            current = dep.spec.replicas or 0
-            if current > 0:
-                log.info("deployment already scaling", group=group, replicas=current)
+            annotations = rg.get("metadata", {}).get("annotations", {})
+            if annotations.get(self.WAKE_ANNOTATION):
+                log.info("wake already requested for replicagroup", group=group)
                 return
 
-            body = {"spec": {"replicas": spec.get("model", {}).get("workers", 1)}}
-            self.apps_api.patch_namespaced_deployment_scale(
-                name=deployment_name,
-                namespace=namespace,
-                body=body,
+            spec = rg.get("spec", {})
+            desired = str(spec.get("model", {}).get("workers", 1))
+
+            patch = {
+                "metadata": {
+                    "annotations": {
+                        self.WAKE_ANNOTATION: desired,
+                    }
+                }
+            }
+            self.custom_api.patch_namespaced_custom_object(
+                group="kubbernetd.io", version="v1",
+                namespace=namespace, plural="replicagroups",
+                name=group,
+                body=patch,
             )
             self.discovery.clear_cache(namespace, group)
-            log.info("signaled wake for replicagroup", group=group, namespace=namespace)
+            log.info("signaled wake for replicagroup", group=group, namespace=namespace,
+                      desired_replicas=desired)
         except client.exceptions.ApiException as e:
             if e.status == 404:
-                log.warning("replicagroup or deployment not found", group=group, error=str(e))
+                log.warning("replicagroup not found", group=group, error=str(e))
             else:
                 log.warning("wake signal failed", group=group, error=str(e))
         except Exception as e:

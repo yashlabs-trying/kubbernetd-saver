@@ -15,7 +15,7 @@ spec:
       labels:
         app: kubbernetd-proxy
     spec:
-      serviceAccountName: kubbernetd-operator
+      serviceAccountName: kubbernetd-proxy
       containers:
         - name: proxy
           image: ghcr.io/kubbernetd/proxy:latest
