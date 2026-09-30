@@ -143,6 +143,7 @@ class ReplicaGroupController:
                     "lastWakeDuration": state.status.lastWakeDuration,
                     "gpuHoursSaved": state.status.gpuHoursSaved,
                     "requestLoss": state.status.requestLoss,
+                    "wakeCount": state.status.wakeCount,
                 }
             }
             self.custom_api.patch_namespaced_custom_object_status(
@@ -254,6 +255,7 @@ class ReplicaGroupController:
         self._set_condition(state, "Ready", "False", "Sleeping", "zero replicas, waiting for wake")
         self._write_status(name, namespace, state)
         if self._wake_requested(name, namespace):
+            state.status.wakeCount += 1
             self._clear_wake_annotation(name, namespace)
             self._transition(name, namespace, state, GroupPhase.ALLOCATING)
 

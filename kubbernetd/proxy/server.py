@@ -193,6 +193,11 @@ class ProxyServer:
 
 
 def main():
+    from kubernetes import config as k8s_config
+    try:
+        k8s_config.load_incluster_config()
+    except k8s_config.ConfigException:
+        k8s_config.load_kube_config()
     discovery = EndpointDiscovery()
     buffer = RequestBuffer()
     forwarder = RequestForwarder(upstream_port=80)
