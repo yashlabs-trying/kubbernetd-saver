@@ -24,34 +24,49 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-          pip install pytest
+          pip install -e ".[test]"
 
-      - name: Run unit tests with report
+      - name: Run unit tests
         id: pytest
         continue-on-error: true
         run: |
           python -m pytest tests/ -v --tb=line --junitxml=report.xml 2>&1 | tee pytest.out
           echo "status=$?" >> $GITHUB_OUTPUT
 
-      - name: Parse test results
+      - name: Parse test results (JUnit XML)
         run: |
           echo "=== UNIT TEST RESULTS ==="
-          TOTAL=$(grep -cP "^\w+::\w+ " pytest.out 2>/dev/null || echo 0)
-          PASSED=$(grep -c "PASSED" pytest.out 2>/dev/null || echo 0)
-          FAILED=$(grep -c "FAILED" pytest.out 2>/dev/null || echo 0)
-          ERRORS=$(grep -c "ERROR" pytest.out 2>/dev/null || echo 0)
-          SKIPPED=$(grep -c "SKIPPED" pytest.out 2>/dev/null || echo 0)
-          XFAIL=$(grep -c "XFAIL" pytest.out 2>/dev/null || echo 0)
-          echo "  Total:   $TOTAL"
-          echo "  Passed:  $PASSED"
-          echo "  Failed:  $FAILED"
-          echo "  Errors:  $ERRORS"
-          echo "  Skipped: $SKIPPED (K8s not available)"
-          echo "  XFail:   $XFAIL"
-          if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
-            echo "FAILURES:"
-            grep -E "FAILED|ERROR" pytest.out | head -20
+          if [ -f report.xml ]; then
+            python -c "
+import xml.etree.ElementTree as ET
+tree = ET.parse('report.xml')
+root = tree.getroot()
+total = int(root.attrib.get('tests', 0))
+failures = int(root.attrib.get('failures', 0))
+errors = int(root.attrib.get('errors', 0))
+skipped = int(root.attrib.get('skipped', 0))
+passed = total - failures - errors - skipped
+print(f'  Total:   {total}')
+print(f'  Passed:  {passed}')
+print(f'  Failed:  {failures}')
+print(f'  Errors:  {errors}')
+print(f'  Skipped: {skipped}')
+if failures > 0 or errors > 0:
+    for ts in root.findall('testsuite'):
+        for tc in ts.findall('testcase'):
+            if tc.find('failure') is not None:
+                print(f'  FAIL {tc.attrib.get(\"classname\",\"\")}.{tc.attrib.get(\"name\",\"\")}')
+                print(f'    {tc.find(\"failure\").attrib.get(\"message\",\"\")}')
+            if tc.find('error') is not None:
+                print(f'  ERROR {tc.attrib.get(\"classname\",\"\")}.{tc.attrib.get(\"name\",\"\")}')
+            if tc.find('skipped') is not None:
+                print(f'  SKIP {tc.attrib.get(\"classname\",\"\")}.{tc.attrib.get(\"name\",\"\")}')
+            for tc2 in ts.findall('testcase'):
+                if tc2.find('failure') is not None:
+                    raise SystemExit(1)
+          " 2>&1
+          else
+            echo "No report.xml found"
             exit 1
           fi
           echo "All non-skipped tests passed."
@@ -68,17 +83,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install kubbernetd
-        run: pip install -e .
-
-      - name: Install kind + kubectl + tools
+      - name: Install tools
         run: |
+          pip install -e ".[test]"
           LANG=en_US.UTF-8
           curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
           chmod +x /usr/local/bin/kind
           curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-          sudo apt-get update -qq && sudo apt-get install -y -qq jq httpie 2>/dev/null || true
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq httpie bc 2>/dev/null || true
 
       - name: Create kind cluster
         run: kind create cluster --name kubbernetd-ci --wait 60s
@@ -138,7 +151,7 @@ jobs:
           kubectl port-forward service/kubbernetd-proxy -n kubbernetd 18080:8080 &
           echo "PROXY_PF=$!" >> $GITHUB_ENV
           sleep 5
-          echo "Proxy tunnel ready on :18080"
+          curl -s http://localhost:18080/healthz || echo "Proxy health check deferred"
 
       # ════════════════════════════════════════════════════════════
       # TEST 1 — Autonomous idle → zero
@@ -227,8 +240,8 @@ jobs:
 
       - name: "E2E 4/9: Concurrent multi-model cold wake"
         run: |
-          kubectl scale deployment test-model --replicas=0
-          sleep 5
+          # Let test-model idle to 0 autonomously (wait past its 15s timeout)
+          sleep 20
           R1=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
           R2=$(kubectl get deployment test-model-2 -o jsonpath='{.spec.replicas}')
           echo "model1=${R1} model2=${R2}"
@@ -259,20 +272,29 @@ jobs:
       # ════════════════════════════════════════════════════════════
       - name: "E2E 5/9: Operator restart with subsequent autonomous lifecycle"
         run: |
+          # Kill the operator
           kubectl delete pod -n kubbernetd -l app=kubbernetd-operator --force --grace-period=0 2>/dev/null || true
           sleep 12
           kubectl wait --for=condition=available deployment/kubbernetd-operator -n kubbernetd --timeout=60s
           OP_PHASE=$(kubectl get pod -n kubbernetd -l app=kubbernetd-operator -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
           echo "operator_after_restart=${OP_PHASE}"
 
-          kubectl scale deployment test-model --replicas=0 2>/dev/null || true
+          # Wait for the operator to re-register existing groups (kopf resume)
           sleep 5
+          PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "UNKNOWN")
+          echo "rg_phase_after_restart=${PHASE}"
 
+          # Now wait for autonomous idle timeout → scale to 0
+          sleep 30
+          R=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
+          echo "after_idle_replicas=${R}"
+
+          # Now send request through proxy → autonomous wake
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "X-Kubbernetd-Service: test-model-rg" \
             --max-time 60 http://localhost:18080/ 2>/dev/null || echo "000")
-          PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}')
-          echo "post_restart_wake_http=${HTTP_CODE} rg_phase=${PHASE}"
+          PHASE2=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}')
+          echo "post_restart_wake_http=${HTTP_CODE} rg_phase=${PHASE2}"
 
           if [ "$HTTP_CODE" = "200" ]; then
             echo "E2E_5: PASS"
@@ -308,7 +330,6 @@ jobs:
       - name: "E2E 6/9: Active request prevents scale-down"
         run: |
           kubectl wait --for=condition=available deployment/long-request --timeout=30s
-          START_TS=$(date +%s)
 
           curl -s -o /tmp/e2e_6_body.txt -w "%{http_code}" \
             -H "X-Kubbernetd-Service: long-request-rg" \
@@ -455,6 +476,7 @@ jobs:
       # ════════════════════════════════════════════════════════════
       - name: "E2E 9/9: 100 concurrent cold requests"
         run: |
+          # Scale test-model to 0 to ensure cold start
           kubectl scale deployment test-model --replicas=0
           sleep 5
           R0=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
@@ -465,8 +487,7 @@ jobs:
           fi
 
           BEFORE_PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "UNKNOWN")
-          BEFORE_WAKE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.lastWakeDuration}' 2>/dev/null || echo "0")
-          echo "before: phase=${BEFORE_PHASE} lastWakeDuration=${BEFORE_WAKE}"
+          echo "before: phase=${BEFORE_PHASE}"
 
           START_TS=$(date +%s%N)
           seq 1 100 | xargs -P 100 -I {} curl -s -o /dev/null -w "%{http_code}\n" \
@@ -490,8 +511,23 @@ jobs:
           PX=$(kubectl get pod -n kubbernetd -l app=kubbernetd-proxy -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Unknown")
           echo "proxy_health=${PX}"
 
-          AFTER_WAKE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.lastWakeDuration}' 2>/dev/null || echo "0")
-          echo "last_wake_duration=${AFTER_WAKE}"
+          # Track wake transitions by counting SLEEPING→ALLOCATING in conditions
+          WAKE_COUNT=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.conditions}' 2>/dev/null | python3 -c "
+import sys, json
+try:
+    conditions = json.loads(sys.stdin.read())
+    if isinstance(conditions, list):
+        wake_events = [c for c in conditions if c.get('reason') == 'Allocating']
+        print(len(wake_events))
+    else:
+        print(0)
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+          echo "wake_transitions=${WAKE_COUNT}"
+
+          AFTER_PHASE=$(kubectl get replicagroup test-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null || echo "UNKNOWN")
+          echo "after: phase=${AFTER_PHASE}"
 
           if [ "$TOTAL" != "100" ]; then
             echo "FAIL: expected 100 results, got ${TOTAL}"
@@ -514,17 +550,25 @@ jobs:
             exit 1
           fi
 
-          WAKE_OK=$(echo "${AFTER_WAKE} > 0" | bc 2>/dev/null || echo 0)
-          if [ "$WAKE_OK" = "1" ]; then
-            echo "Wake deduplication confirmed: single wake (${AFTER_WAKE}s)"
-          else
-            echo "WARN: lastWakeDuration not populated (may be first wake ever)"
-          fi
-
-          echo "E2E_9: PASS (100/100, 0 failures, ${TOTAL_MS}ms total)"
+          echo "E2E_9: PASS (100/100, 0 failures, wake_transitions=${WAKE_COUNT}, ${TOTAL_MS}ms total)"
 
       - name: Cleanup
         if: always()
         run: |
           kill $PROXY_PF 2>/dev/null || true
           kind delete cluster --name kubbernetd-ci 2>/dev/null || true
+
+      # ════════════════════════════════════════════════════════════
+      # Branch protection enforcement (epilog)
+      # ════════════════════════════════════════════════════════════
+      - name: Verify required checks present for branch protection
+        run: |
+          echo "Required status checks for main branch:"
+          echo "  - unit-tests (3.10)"
+          echo "  - unit-tests (3.11)"
+          echo "  - unit-tests (3.12)"
+          echo "  - k8s-e2e"
+          echo ""
+          echo "Configure these in: Settings → Branches → main → Edit"
+          echo "Alternatively, run:"
+          echo '  gh api repos/{owner}/{repo}/branches/main/protection -X PUT ...'

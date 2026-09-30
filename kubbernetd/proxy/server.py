@@ -11,6 +11,7 @@ from kubbernetd.proxy.auth import TargetAuthorizer
 
 log = structlog.get_logger()
 ACTIVE_ANNOTATION = "kubbernetd.io/active-requests"
+CONCURRENCY_LIMIT = 25
 
 
 class ProxyServer:
@@ -142,23 +143,29 @@ class ProxyServer:
 
     async def _trigger_wake(self, namespace: str, group: str, target_service: str):
         try:
-            ready = await self.signaler.ensure_ready(namespace, group)
+            ready = await self.signaler.ensure_ready(namespace, group, target_service)
             if ready:
-                entries, stored_request = self.buffer.release(namespace, group)
+                entries = self.buffer.release(namespace, group)
                 target_ip = self.discovery.next_ip(namespace, target_service)
                 if target_ip and entries:
-                    method, path, headers, body = stored_request or ("GET", "/", {}, b"")
-                    async def _dummy_read(body=body):
-                        return body
-                    dummy_req = web.Request(url=path, method=method, headers=headers)
-                    dummy_req._cached_body = body
-                    for future, _ in entries:
-                        if not future.done():
-                            resp = await self.forwarder.forward_streaming(
-                                request=dummy_req,
+                    sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+                    async def _forward_one(future, entry):
+                        async with sem:
+                            method, path, headers, body = entry.request_data or ("GET", "/", {}, b"")
+                            status, resp_headers, resp_body = await self.forwarder.forward_raw(
+                                method=method,
+                                path=path,
+                                headers=headers,
+                                body=body,
                                 target_ip=target_ip,
                             )
-                            future.set_result(resp)
+                            if not future.done():
+                                resp = web.Response(status=status, headers=resp_headers, body=resp_body)
+                                future.set_result(resp)
+
+                    tasks = [_forward_one(f, e) for f, e in entries if not f.done()]
+                    await asyncio.gather(*tasks, return_exceptions=True)
                 elif not target_ip:
                     self._fail_held(namespace, group, "no ready workers after wake")
                 log.info("wake complete, forwarded held requests", group=group, count=len(entries))

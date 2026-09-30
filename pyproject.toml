@@ -29,6 +29,12 @@ kubbernetd-operator = "kubbernetd.operator.main:main"
 kubbernetd-agent = "kubbernetd.agent.sidecar:main"
 kubbernetd-proxy = "kubbernetd.proxy.server:main"
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "anyio>=4.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["kubbernetd*"]

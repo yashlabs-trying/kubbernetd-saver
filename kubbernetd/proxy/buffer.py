@@ -11,6 +11,7 @@ log = structlog.get_logger()
 @dataclass
 class HoldingEntry:
     created_at: float = field(default_factory=time.monotonic)
+    request_data: Optional[tuple] = None
 
 
 class RequestBuffer:
@@ -19,7 +20,6 @@ class RequestBuffer:
         self._request_ttl = request_ttl
         self._holders: dict[tuple[str, str], list[tuple[asyncio.Future, HoldingEntry]]] = defaultdict(list)
         self._pending_scale: set[tuple[str, str]] = set()
-        self._request_store: dict[tuple[str, str], tuple] = {}
 
     def hold(self, namespace: str, service: str, future: asyncio.Future, request_data: tuple = None) -> bool:
         key = (namespace, service)
@@ -27,9 +27,7 @@ class RequestBuffer:
         if len(holders) >= self._max_waiters:
             log.warning("max waiters reached, rejecting", service=service, namespace=namespace)
             return False
-        holders.append((future, HoldingEntry()))
-        if request_data is not None:
-            self._request_store[key] = request_data
+        holders.append((future, HoldingEntry(request_data=request_data)))
         return True
 
     def needs_scale_signal(self, namespace: str, service: str) -> bool:
@@ -42,12 +40,11 @@ class RequestBuffer:
     def mark_signaled(self, namespace: str, service: str):
         self._pending_scale.discard((namespace, service))
 
-    def release(self, namespace: str, service: str) -> tuple[list[tuple[asyncio.Future, HoldingEntry]], tuple]:
+    def release(self, namespace: str, service: str) -> list[tuple[asyncio.Future, HoldingEntry]]:
         key = (namespace, service)
         entries = self._holders.pop(key, [])
-        stored = self._request_store.pop(key, None)
         self._pending_scale.discard(key)
-        return entries, stored
+        return entries
 
     def waiter_count(self, namespace: str, service: str) -> int:
         return len(self._holders.get((namespace, service), []))
