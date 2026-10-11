@@ -1,5 +1,5 @@
-import typer
 import structlog
+import typer
 from kubernetes import client, config
 
 log = structlog.get_logger()
@@ -7,7 +7,7 @@ log = structlog.get_logger()
 
 def _try_load_kube():
     try:
-        config.load_incluster_client()
+        config.load_incluster_config()
     except Exception:
         config.load_kube_config()
 
@@ -52,7 +52,7 @@ def watch(
 
     name = f"{deployment}-rg"
     try:
-        existing = custom_api.get_namespaced_custom_object(
+        custom_api.get_namespaced_custom_object(
             group="kubbernetd.io", version="v1", namespace=namespace,
             plural="replicagroups", name=name,
         )

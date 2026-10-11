@@ -1,13 +1,14 @@
 import asyncio
+
 import structlog
 from aiohttp import web
 from kubernetes import client
 
+from kubbernetd.proxy.auth import TargetAuthorizer
 from kubbernetd.proxy.buffer import RequestBuffer
+from kubbernetd.proxy.discovery import EndpointDiscovery
 from kubbernetd.proxy.forwarder import RequestForwarder
 from kubbernetd.proxy.signal import GroupSignaler
-from kubbernetd.proxy.discovery import EndpointDiscovery
-from kubbernetd.proxy.auth import TargetAuthorizer
 
 log = structlog.get_logger()
 ACTIVE_ANNOTATION = "kubbernetd.io/active-requests"
@@ -53,6 +54,7 @@ class ProxyServer:
 
     async def _set_active(self, namespace: str, rg_name: str, active: bool):
         key = (namespace, rg_name)
+        loop = asyncio.get_running_loop()
         async with self._active_lock:
             prev = self._active_counter.get(key, 0)
             if active:
@@ -60,10 +62,12 @@ class ProxyServer:
                 if prev == 0:
                     try:
                         patch = {"metadata": {"annotations": {ACTIVE_ANNOTATION: "1"}}}
-                        self.custom_api.patch_namespaced_custom_object(
-                            group="kubbernetd.io", version="v1",
-                            namespace=namespace, plural="replicagroups",
-                            name=rg_name, body=patch,
+                        await loop.run_in_executor(
+                            None, lambda: self.custom_api.patch_namespaced_custom_object(
+                                group="kubbernetd.io", version="v1",
+                                namespace=namespace, plural="replicagroups",
+                                name=rg_name, body=patch,
+                            )
                         )
                     except Exception:
                         pass
@@ -73,10 +77,12 @@ class ProxyServer:
                     self._active_counter.pop(key, None)
                     try:
                         patch = {"metadata": {"annotations": {ACTIVE_ANNOTATION: None}}}
-                        self.custom_api.patch_namespaced_custom_object(
-                            group="kubbernetd.io", version="v1",
-                            namespace=namespace, plural="replicagroups",
-                            name=rg_name, body=patch,
+                        await loop.run_in_executor(
+                            None, lambda: self.custom_api.patch_namespaced_custom_object(
+                                group="kubbernetd.io", version="v1",
+                                namespace=namespace, plural="replicagroups",
+                                name=rg_name, body=patch,
+                            )
                         )
                     except Exception:
                         pass
@@ -84,11 +90,14 @@ class ProxyServer:
                     self._active_counter[key] = new_val
 
     async def _resolve_target_service(self, namespace: str, rg_name: str) -> str:
+        loop = asyncio.get_running_loop()
         try:
-            rg = self.custom_api.get_namespaced_custom_object(
-                group="kubbernetd.io", version="v1",
-                namespace=namespace, plural="replicagroups",
-                name=rg_name,
+            rg = await loop.run_in_executor(
+                None, lambda: self.custom_api.get_namespaced_custom_object(
+                    group="kubbernetd.io", version="v1",
+                    namespace=namespace, plural="replicagroups",
+                    name=rg_name,
+                )
             )
             spec = rg.get("spec", {})
             target = spec.get("targetRef", {})
@@ -117,6 +126,9 @@ class ProxyServer:
                     target_ip=target_ip,
                 )
             return await self._hold_and_wake(request, namespace, rg_name, target_service)
+        except asyncio.CancelledError:
+            self.buffer.release(namespace, rg_name)
+            raise
         finally:
             await self._set_active(namespace, rg_name, False)
 

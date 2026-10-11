@@ -1,3 +1,3 @@
-from kubbernetd.common.types import OperatorConfig, AgentConfig, ProxyConfig
+from kubbernetd.common.types import AgentConfig, OperatorConfig, ProxyConfig
 
-__all__ = ["OperatorConfig", "AgentConfig", "ProxyConfig"]
+__all__ = ["AgentConfig", "OperatorConfig", "ProxyConfig"]

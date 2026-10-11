@@ -1,11 +1,13 @@
-import time
 import threading
+import time
+
 import structlog
 from kubernetes import client
 
 from kubbernetd.common.types import (
-    GroupPhase, SleepDepth, ReplicaGroupState, ReplicaGroupStatus,
-    WakeStages, OperatorConfig,
+    GroupPhase,
+    OperatorConfig,
+    ReplicaGroupState,
 )
 from kubbernetd.operator.metrics import MetricsExporter
 
@@ -55,7 +57,6 @@ class ReplicaGroupController:
 
     def _initial_phase(self, spec: dict) -> GroupPhase:
         target = spec.get("targetRef", {})
-        kind = target.get("kind", "Deployment")
         name = target.get("name", "")
         if not name:
             return GroupPhase.UNKNOWN
@@ -235,7 +236,6 @@ class ReplicaGroupController:
     def _handle_draining(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Draining", "True", "WaitingForSequences", "draining active requests")
         self._write_status(name, namespace, state)
-        target = state.spec.get("targetRef", {}).get("name", "")
         active = self._has_active_proxy_requests(name, namespace)
         drain_timeout = state.spec.get("sleepPolicy", {}).get("drainTimeout", 60)
         start = state.stage_started_at
@@ -271,6 +271,7 @@ class ReplicaGroupController:
         self._write_status(name, namespace, state)
         if self._wake_requested(name, namespace):
             state.status.wakeCount += 1
+            state.wake_started_at = now
             self._clear_wake_annotation(name, namespace)
             self._transition(name, namespace, state, GroupPhase.ALLOCATING)
 
@@ -359,6 +360,8 @@ class ReplicaGroupController:
             state.wake_stages.warmup = time.monotonic() - state.stage_started_at
             elapsed = time.monotonic() - state.wake_started_at
             state.status.lastWakeDuration = elapsed
+            state.error_count = 0
+            state.last_error_at = 0.0
             self._set_condition(state, "Ready", "True", "Running", "all workers ready and serving")
             self._write_status(name, namespace, state)
             self._transition(name, namespace, state, GroupPhase.RUNNING)

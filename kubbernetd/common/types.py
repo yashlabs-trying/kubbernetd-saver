@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from os import environ
-from typing import Optional
 
 
 class GroupPhase(Enum):
@@ -141,7 +139,7 @@ class ReplicaGroupState:
 class OperatorConfig:
     idle_timeout_seconds: int = int(environ.get("KUBBERNETD_IDLE_TIMEOUT", "300"))
     check_interval_seconds: int = int(environ.get("KUBBERNETD_CHECK_INTERVAL", "10"))
-    namespace: Optional[str] = environ.get("KUBBERNETD_NAMESPACE", None)
+    namespace: str | None = environ.get("KUBBERNETD_NAMESPACE", None)
     metrics_port: int = int(environ.get("KUBBERNETD_METRICS_PORT", "8080"))
     shadow_pods: int = int(environ.get("KUBBERNETD_SHADOW_PODS", "1"))
     stale_cleanup_age: int = int(environ.get("KUBBERNETD_STALE_CLEANUP_AGE", "86400"))
@@ -149,8 +147,8 @@ class OperatorConfig:
 
 @dataclass
 class AgentConfig:
-    warmup_command: Optional[str] = environ.get("KUBBERNETD_WARMUP_CMD", None)
-    model_path: Optional[str] = environ.get("KUBBERNETD_MODEL_PATH", None)
+    warmup_command: str | None = environ.get("KUBBERNETD_WARMUP_CMD", None)
+    model_path: str | None = environ.get("KUBBERNETD_MODEL_PATH", None)
     shadow_mode: bool = environ.get("KUBBERNETD_SHADOW_MODE", "false").lower() == "true"
 
 

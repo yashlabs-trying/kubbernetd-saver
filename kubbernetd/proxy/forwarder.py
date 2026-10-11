@@ -1,4 +1,5 @@
 import asyncio
+
 import structlog
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 
@@ -60,6 +61,8 @@ class RequestForwarder:
             ) as resp:
                 resp_body = await resp.read()
                 return resp.status, dict(resp.headers), resp_body
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log.warning("raw forward failed", url=url, error=str(e))
             return 502, {}, b"upstream error"
@@ -89,11 +92,15 @@ class RequestForwarder:
                 await response.prepare(response_for)
                 async for chunk in resp.content.iter_chunked(65536):
                     if response_for.transport is None or response_for.transport.is_closing():
-                        log.debug("client disconnected, stopping forward", url=url)
+                        log.debug("client disconnected, cancelling upstream request", url=url)
+                        await asyncio.shield(resp.close())
                         break
                     await response.write(chunk)
-                await response.write_eof()
+                if not response_for.transport or not response_for.transport.is_closing():
+                    await response.write_eof()
                 return response
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log.warning("streaming forward failed", url=url, error=str(e))
             return web.Response(status=502, text=f"upstream error: {e}")
