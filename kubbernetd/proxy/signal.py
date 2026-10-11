@@ -1,4 +1,5 @@
 import asyncio
+
 import structlog
 from kubernetes import client
 
@@ -19,15 +20,18 @@ class GroupSignaler:
         ready_before = self.discovery.has_ready_pods(namespace, target_service)
         if ready_before:
             return True
-        self._signal_wake(namespace, group, target_service)
+        await self._signal_wake(namespace, group, target_service)
         return await self._wait_for_readiness(namespace, group, target_service, timeout)
 
-    def _signal_wake(self, namespace: str, group: str, target_service: str):
+    async def _signal_wake(self, namespace: str, group: str, target_service: str):
+        loop = asyncio.get_running_loop()
         try:
-            rg = self.custom_api.get_namespaced_custom_object(
-                group="kubbernetd.io", version="v1",
-                namespace=namespace, plural="replicagroups",
-                name=group,
+            rg = await loop.run_in_executor(
+                None, lambda: self.custom_api.get_namespaced_custom_object(
+                    group="kubbernetd.io", version="v1",
+                    namespace=namespace, plural="replicagroups",
+                    name=group,
+                )
             )
 
             annotations = rg.get("metadata", {}).get("annotations", {})
@@ -45,11 +49,12 @@ class GroupSignaler:
                     }
                 }
             }
-            self.custom_api.patch_namespaced_custom_object(
-                group="kubbernetd.io", version="v1",
-                namespace=namespace, plural="replicagroups",
-                name=group,
-                body=patch,
+            await loop.run_in_executor(
+                None, lambda: self.custom_api.patch_namespaced_custom_object(
+                    group="kubbernetd.io", version="v1",
+                    namespace=namespace, plural="replicagroups",
+                    name=group, body=patch,
+                )
             )
             self.discovery.clear_cache(namespace, target_service)
             log.info("signaled wake for replicagroup", group=group, namespace=namespace,
@@ -63,13 +68,16 @@ class GroupSignaler:
             log.warning("wake signal failed unexpectedly", group=group, error=str(e))
 
     async def _wait_for_readiness(self, namespace: str, group: str, target_service: str, timeout: float) -> bool:
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
             try:
-                rg = self.custom_api.get_namespaced_custom_object(
-                    group="kubbernetd.io", version="v1",
-                    namespace=namespace, plural="replicagroups",
-                    name=group,
+                rg = await loop.run_in_executor(
+                    None, lambda: self.custom_api.get_namespaced_custom_object(
+                        group="kubbernetd.io", version="v1",
+                        namespace=namespace, plural="replicagroups",
+                        name=group,
+                    )
                 )
                 status = rg.get("status", {})
                 phase = status.get("phase", "UNKNOWN")

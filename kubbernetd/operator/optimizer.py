@@ -1,5 +1,5 @@
+
 import structlog
-from typing import Optional
 
 log = structlog.get_logger()
 
@@ -15,7 +15,7 @@ def _format_seconds(seconds: float) -> str:
 class ColdStartProfiler:
     def __init__(self):
         self._stages: dict[str, float] = {}
-        self._current_stage: Optional[str] = None
+        self._current_stage: str | None = None
         self._stage_start: float = 0.0
         self._started: bool = False
 

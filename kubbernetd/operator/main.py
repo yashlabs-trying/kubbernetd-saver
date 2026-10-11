@@ -3,11 +3,11 @@ import threading
 
 import kopf
 import structlog
-from kubernetes import client, config
+from kubernetes import config
 
-from kubbernetd.operator.rg_controller import ReplicaGroupController
-from kubbernetd.operator.metrics import MetricsExporter
 from kubbernetd.common.types import OperatorConfig
+from kubbernetd.operator.metrics import MetricsExporter
+from kubbernetd.operator.rg_controller import ReplicaGroupController
 
 log = structlog.get_logger()
 cfg = OperatorConfig()

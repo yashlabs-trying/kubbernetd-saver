@@ -1,12 +1,13 @@
 import asyncio
 import signal
-import structlog
-from kubernetes import client, config
 
-from kubbernetd.common.types import AgentConfig
-from kubbernetd.agent.warmer import ModelWarmer
-from kubbernetd.agent.reporter import StatusReporter
+import structlog
+from kubernetes import config
+
 from kubbernetd.agent.engine_adapter import EngineAdapter
+from kubbernetd.agent.reporter import StatusReporter
+from kubbernetd.agent.warmer import ModelWarmer
+from kubbernetd.common.types import AgentConfig
 
 log = structlog.get_logger()
 
@@ -42,7 +43,7 @@ class Sidecar:
 
 
 def main():
-    config.load_incluster_client()
+    config.load_incluster_config()
     cfg = AgentConfig()
     sidecar = Sidecar(cfg)
     asyncio.run(sidecar.run())

@@ -1,7 +1,6 @@
-import os
-import structlog
 from pathlib import Path
-from typing import Optional
+
+import structlog
 
 log = structlog.get_logger()
 
@@ -14,11 +13,10 @@ class CacheManager:
         model_dir = self.cache_path / model_name
         return model_dir.is_dir() and any(model_dir.iterdir())
 
-    def shard_path(self, model_name: str, rank: int, pattern: str = "model-rank-{rank}-part-*.safetensors") -> Optional[str]:
+    def shard_path(self, model_name: str, rank: int, pattern: str = "model-rank-{rank}-part-*.safetensors") -> str | None:
         model_dir = self.cache_path / model_name
         if not model_dir.is_dir():
             return None
-        from glob import glob
         pat = pattern.replace("{rank}", str(rank))
         matches = list(model_dir.glob(pat))
         if matches:

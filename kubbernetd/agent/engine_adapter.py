@@ -1,7 +1,7 @@
 import asyncio
 import time
+
 import structlog
-from typing import Optional
 
 log = structlog.get_logger()
 

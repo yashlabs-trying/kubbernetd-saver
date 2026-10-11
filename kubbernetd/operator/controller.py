@@ -1,5 +1,5 @@
-import time
 import threading
+import time
 from enum import Enum, auto
 
 import structlog
@@ -7,8 +7,8 @@ from kubernetes import client
 
 from kubbernetd.common.types import OperatorConfig
 from kubbernetd.monitor.idle_detector import IdleDetector
-from kubbernetd.operator.scaler import Scaler
 from kubbernetd.operator.metrics import MetricsExporter
+from kubbernetd.operator.scaler import Scaler
 
 log = structlog.get_logger()
 
@@ -173,8 +173,9 @@ class Controller:
             and phase in (ServicePhase.RUNNING, ServicePhase.ERROR)
         )
         should_scale_up = (
-            current < min(1, max_r)
-            and idle_seconds < timeout
+            current == 0
+            and max_r > 0
+            and in_flight > 0
             and phase in (ServicePhase.STOPPED, ServicePhase.ERROR)
         )
 

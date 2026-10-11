@@ -1,19 +1,15 @@
-import os
 import time
+
 import typer
-from datetime import datetime
 from kubernetes import client, config
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from rich.layout import Layout
-from rich.live import Live
-from rich.text import Text
+from rich.table import Table
 
 
 def _try_load_kube():
     try:
-        config.load_incluster_client()
+        config.load_incluster_config()
     except Exception:
         config.load_kube_config()
 
@@ -50,7 +46,7 @@ def _fetch_data(core_api, apps_api, custom_api) -> list[dict]:
 
     for item in replicagroups.get("items", []):
         spec = item.get("spec", {})
-        target = spec.get("target", {})
+        target = spec.get("targetRef", {})
         name = target.get("name", "unknown")
         ns = item.get("metadata", {}).get("namespace", "default")
         timeout = spec.get("idleTimeout", 300)
