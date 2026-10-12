@@ -100,7 +100,7 @@ def build_app(mode: str) -> web.Application:
 
 
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("E2E_HELPER_MODE", "normal")
+    mode = os.environ.get("E2E_HELPER_MODE") or (sys.argv[1] if len(sys.argv) > 1 else "normal")
     port = int(os.environ.get("E2E_HELPER_PORT", "8080"))
     app = build_app(mode)
     print(f"{LOG_PREFIX} Starting in mode={mode} port={port}", flush=True)
