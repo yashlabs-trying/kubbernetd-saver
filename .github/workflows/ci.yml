@@ -434,6 +434,12 @@ jobs:
           EOF
           sleep 3
 
+      - name: "E2E 8 precheck: slow-model-rg phase"
+        run: |
+          echo "rg_phase=$(kubectl get replicagroup slow-model-rg -n default -o jsonpath='{.status.phase}')"
+          echo "deploy_replicas=$(kubectl get deployment slow-model -o jsonpath='{.spec.replicas}')"
+          kubectl get replicagroup slow-model-rg -n default -o yaml | sed -n '1,40p'
+
       - name: "E2E 8/9: Actual readiness delay respected"
         run: |
           START_TS=$(date +%s%N)
@@ -459,6 +465,11 @@ jobs:
 
           if [ "$RESP_CODE" != "200" ]; then
             echo "E2E_8: FAIL (HTTP ${RESP_CODE})"
+            echo "rg_phase=$(kubectl get replicagroup slow-model-rg -n default -o jsonpath='{.status.phase}' 2>/dev/null)"
+            echo "rg_wakeCount=$(kubectl get replicagroup slow-model-rg -n default -o jsonpath='{.status.wakeCount}' 2>/dev/null)"
+            echo "deploy_replicas=$(kubectl get deployment slow-model -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+            kubectl get pods -l app=slow-model -o wide 2>/dev/null || true
+            kubectl describe replicagroup slow-model-rg -n default 2>/dev/null | tail -20 || true
             exit 1
           fi
           if [ $ELAPSED_MS -lt 10000 ]; then
