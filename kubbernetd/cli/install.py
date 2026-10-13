@@ -43,7 +43,7 @@ def install(
         ["kubectl", "create", "namespace", namespace, "--dry-run=client", "-o", "yaml"],
         capture_output=True, text=True, check=False,
     )
-    subprocess.run(["kubectl", "apply", "-f", "-"], input=result.stdout, capture_output=True, check=False)
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=result.stdout, capture_output=True, text=True, check=False)
 
     result = subprocess.run(
         ["kubectl", "apply", "-f", rbac, "-n", namespace],
