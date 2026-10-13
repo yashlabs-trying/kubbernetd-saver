@@ -158,7 +158,14 @@ class ProxyServer:
             ready = await self.signaler.ensure_ready(namespace, group, target_service)
             if ready:
                 entries = self.buffer.release(namespace, group)
-                target_ip = self.discovery.next_ip(namespace, target_service)
+                # The group can report ready before its endpoint is registered.
+                # Poll briefly so held requests are forwarded instead of dropped.
+                target_ip = None
+                for _ in range(30):
+                    target_ip = self.discovery.next_ip(namespace, target_service)
+                    if target_ip:
+                        break
+                    await asyncio.sleep(0.5)
                 if target_ip and entries:
                     sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
@@ -178,9 +185,18 @@ class ProxyServer:
 
                     tasks = [_forward_one(f, e) for f, e in entries if not f.done()]
                     await asyncio.gather(*tasks, return_exceptions=True)
-                elif not target_ip:
-                    self._fail_held(namespace, group, "no ready workers after wake")
-                log.info("wake complete, forwarded held requests", group=group, count=len(entries))
+                    log.info("wake complete, forwarded held requests", group=group, count=len(entries))
+                else:
+                    # The buffer was already released above, so fail the held
+                    # futures directly (calling _fail_held here would act on an
+                    # empty buffer and leave the requests to time out).
+                    for future, _ in entries:
+                        if not future.done():
+                            future.set_exception(Exception("no ready workers after wake"))
+                    log.warning(
+                        "failed held requests", group=group, count=len(entries),
+                        reason="no ready workers after wake",
+                    )
             else:
                 self._fail_held(namespace, group, "wake failed - group not ready")
         except Exception as e:
