@@ -548,6 +548,22 @@ jobs:
 
           echo "E2E_9: PASS (100/100, 0 failures, wake_delta=${WAKE_DELTA}, ${TOTAL_MS}ms total)"
 
+      - name: "Diagnostics: pods, events and logs"
+        if: always()
+        run: |
+          echo "=== pods ==="
+          kubectl get pods -A -o wide || true
+          echo "=== proxy pod describe ==="
+          kubectl describe pod -n kubbernetd -l app=kubbernetd-proxy || true
+          echo "=== proxy logs (current) ==="
+          kubectl logs -n kubbernetd -l app=kubbernetd-proxy --tail=200 || true
+          echo "=== proxy logs (previous container) ==="
+          kubectl logs -n kubbernetd -l app=kubbernetd-proxy --previous --tail=200 || true
+          echo "=== operator logs ==="
+          kubectl logs -n kubbernetd -l app=kubbernetd-operator --tail=120 || true
+          echo "=== recent events ==="
+          kubectl get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+
       - name: Cleanup
         if: always()
         run: |
