@@ -312,7 +312,7 @@ jobs:
         run: |
           kubectl create deployment long-request --image=kubbernetd/e2e-helper:ci --replicas=0 --port=80
           kubectl expose deployment long-request --port=80 --target-port=80
-          kubectl patch deployment long-request --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"long-request","command":["python","/app/server.py","long-request"]}]}}}}'
+          kubectl patch deployment long-request --type=json -p '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["python","/app/server.py","long-request"]}]'
           kubectl scale deployment long-request --replicas=1
           kubectl wait --for=condition=available deployment/long-request --timeout=30s
           kubectl apply -f - << 'EOF'
@@ -415,7 +415,7 @@ jobs:
         run: |
           kubectl create deployment slow-model --image=kubbernetd/e2e-helper:ci --replicas=0 --port=80
           kubectl expose deployment slow-model --port=80 --target-port=80
-          kubectl patch deployment slow-model --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"slow-model","command":["python","/app/server.py","slow-start"],"readinessProbe":{"httpGet":{"path":"/readiness","port":80},"initialDelaySeconds":0,"periodSeconds":2,"failureThreshold":30}}]}}}}'
+          kubectl patch deployment slow-model --type=json -p '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["python","/app/server.py","slow-start"]},{"op":"add","path":"/spec/template/spec/containers/0/readinessProbe","value":{"httpGet":{"path":"/readiness","port":80},"initialDelaySeconds":0,"periodSeconds":2,"failureThreshold":30}}]'
           kubectl apply -f - << 'EOF'
           apiVersion: kubbernetd.io/v1
           kind: ReplicaGroup
