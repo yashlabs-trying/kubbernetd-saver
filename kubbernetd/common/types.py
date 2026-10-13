@@ -3,6 +3,23 @@ from enum import Enum
 from os import environ
 
 
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env var, falling back to ``default`` if malformed/absent.
+
+    Guards against collisions with Kubernetes auto-generated Service env vars: a
+    Service named ``kubbernetd-proxy`` injects ``KUBBERNETD_PROXY_PORT``
+    (e.g. ``tcp://10.96.0.1:8080``) into every pod in the namespace, which
+    previously crashed the operator at import time.
+    """
+    raw = environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 class GroupPhase(Enum):
     UNKNOWN = "UNKNOWN"
     RUNNING = "RUNNING"
@@ -137,12 +154,12 @@ class ReplicaGroupState:
 
 @dataclass
 class OperatorConfig:
-    idle_timeout_seconds: int = int(environ.get("KUBBERNETD_IDLE_TIMEOUT", "300"))
-    check_interval_seconds: int = int(environ.get("KUBBERNETD_CHECK_INTERVAL", "10"))
+    idle_timeout_seconds: int = _env_int("KUBBERNETD_IDLE_TIMEOUT", 300)
+    check_interval_seconds: int = _env_int("KUBBERNETD_CHECK_INTERVAL", 10)
     namespace: str | None = environ.get("KUBBERNETD_NAMESPACE", None)
-    metrics_port: int = int(environ.get("KUBBERNETD_METRICS_PORT", "8080"))
-    shadow_pods: int = int(environ.get("KUBBERNETD_SHADOW_PODS", "1"))
-    stale_cleanup_age: int = int(environ.get("KUBBERNETD_STALE_CLEANUP_AGE", "86400"))
+    metrics_port: int = _env_int("KUBBERNETD_METRICS_PORT", 8080)
+    shadow_pods: int = _env_int("KUBBERNETD_SHADOW_PODS", 1)
+    stale_cleanup_age: int = _env_int("KUBBERNETD_STALE_CLEANUP_AGE", 86400)
 
 
 @dataclass
@@ -154,9 +171,9 @@ class AgentConfig:
 
 @dataclass
 class ProxyConfig:
-    listen_port: int = int(environ.get("KUBBERNETD_PROXY_PORT", "8080"))
-    upstream_port: int = int(environ.get("KUBBERNETD_UPSTREAM_PORT", "8080"))
-    upstream_timeout_seconds: int = int(environ.get("KUBBERNETD_UPSTREAM_TIMEOUT", "300"))
-    max_buffer_size: int = int(environ.get("KUBBERNETD_MAX_BUFFER", "256"))
-    request_ttl_seconds: int = int(environ.get("KUBBERNETD_REQUEST_TTL", "30"))
-    cleanup_interval_seconds: int = int(environ.get("KUBBERNETD_CLEANUP_INTERVAL", "60"))
+    listen_port: int = _env_int("KUBBERNETD_PROXY_LISTEN_PORT", 8080)
+    upstream_port: int = _env_int("KUBBERNETD_UPSTREAM_PORT", 8080)
+    upstream_timeout_seconds: int = _env_int("KUBBERNETD_UPSTREAM_TIMEOUT", 300)
+    max_buffer_size: int = _env_int("KUBBERNETD_MAX_BUFFER", 256)
+    request_ttl_seconds: int = _env_int("KUBBERNETD_REQUEST_TTL", 30)
+    cleanup_interval_seconds: int = _env_int("KUBBERNETD_CLEANUP_INTERVAL", 60)
