@@ -46,7 +46,7 @@ class ReplicaGroupController:
             name=name,
             namespace=namespace,
             spec=spec,
-            phase=self._initial_phase(spec),
+            phase=self._initial_phase(spec, namespace),
         )
         with self._lock:
             self._groups[(name, namespace)] = state
@@ -55,11 +55,22 @@ class ReplicaGroupController:
                  model=spec_model.get("name", "unknown"),
                  workers=spec_model.get("workers", 1))
 
-    def _initial_phase(self, spec: dict) -> GroupPhase:
+    def _initial_phase(self, spec: dict, namespace: str = "default") -> GroupPhase:
         target = spec.get("targetRef", {})
         name = target.get("name", "")
+        kind = target.get("kind", "Deployment")
         if not name:
             return GroupPhase.UNKNOWN
+        # If the target workload is already scaled to zero, start SLEEPING so a
+        # cold request can wake it immediately. A group initialised as RUNNING
+        # with no workers never becomes ready within the wake window.
+        if kind == "Deployment":
+            try:
+                dep = self.apps_api.read_namespaced_deployment(name=name, namespace=namespace)
+                if (dep.spec.replicas or 0) == 0:
+                    return GroupPhase.SLEEPING
+            except Exception:
+                pass
         return GroupPhase.RUNNING
 
     def remove_group(self, name: str, namespace: str):
