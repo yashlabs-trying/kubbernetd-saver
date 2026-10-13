@@ -9,15 +9,33 @@ log = structlog.get_logger()
 class RequestForwarder:
     def __init__(self, upstream_port: int = 8080, timeout_seconds: int = 300, max_connections: int = 100):
         self.upstream_port = upstream_port
-        connector = TCPConnector(limit=max_connections, limit_per_host=10, enable_cleanup_closed=True, ttl_dns_cache=300)
-        self._session = ClientSession(
-            timeout=ClientTimeout(total=timeout_seconds),
-            connector=connector,
-        )
+        self._timeout_seconds = timeout_seconds
+        self._max_connections = max_connections
+        self._session: ClientSession | None = None
         self._owns_session = True
 
+    def _get_session(self) -> ClientSession:
+        """Create the aiohttp session lazily, inside the running event loop.
+
+        aiohttp >= 3.14 constructs the connector with ``asyncio.get_running_loop()``,
+        so building the session in ``__init__`` (before ``web.run_app`` starts the
+        loop) raises ``RuntimeError: no running event loop``.
+        """
+        if self._session is None or self._session.closed:
+            connector = TCPConnector(
+                limit=self._max_connections,
+                limit_per_host=10,
+                enable_cleanup_closed=True,
+                ttl_dns_cache=300,
+            )
+            self._session = ClientSession(
+                timeout=ClientTimeout(total=self._timeout_seconds),
+                connector=connector,
+            )
+        return self._session
+
     async def close(self):
-        if self._owns_session:
+        if self._owns_session and self._session is not None:
             await self._session.close()
 
     async def forward_streaming(self, request: web.Request, target_ip: str) -> web.StreamResponse:
@@ -53,7 +71,7 @@ class RequestForwarder:
         clean_headers.pop("X-Kubbernetd-Namespace", None)
         clean_headers.pop("X-Kubbernetd-Service", None)
         try:
-            async with self._session.request(
+            async with self._get_session().request(
                 method=method,
                 url=url,
                 headers=clean_headers,
@@ -78,7 +96,7 @@ class RequestForwarder:
     ) -> web.StreamResponse:
         url = f"http://{target_ip}:{self.upstream_port}{path}"
         try:
-            async with self._session.request(
+            async with self._get_session().request(
                 method=method,
                 url=url,
                 headers=headers,
