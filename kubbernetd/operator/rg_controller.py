@@ -201,7 +201,10 @@ class ReplicaGroupController:
             return
         self._reconcile_worker_count(name, namespace, state)
         if state.current_workers == 0:
-            self._transition(name, namespace, state, GroupPhase.SLEEPING)
+            # A running group with no workers must sleep. RUNNING -> SLEEPING is
+            # not a permitted transition, so route via DRAINING (which scales
+            # down to zero and then transitions to SLEEPING).
+            self._transition(name, namespace, state, GroupPhase.DRAINING)
             return
         idle_seconds = self._idle_seconds(name, namespace, now)
         if idle_seconds is None:

@@ -152,6 +152,12 @@ class ProxyServer:
         except asyncio.TimeoutError:
             log.warning("wake timeout", group=group, namespace=namespace)
             return web.Response(status=504, text="replicagroup did not become ready in time")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # A wake failure must surface as a clean error, not an HTTP 500.
+            log.warning("wake failed for held request", group=group, namespace=namespace, error=str(e))
+            return web.Response(status=503, text=f"wake failed: {e}")
 
     async def _trigger_wake(self, namespace: str, group: str, target_service: str):
         try:
