@@ -1,11 +1,13 @@
-import time
 import threading
+import time
+
 import structlog
 from kubernetes import client
 
 from kubbernetd.common.types import (
-    GroupPhase, SleepDepth, ReplicaGroupState, ReplicaGroupStatus,
-    WakeStages, OperatorConfig,
+    GroupPhase,
+    OperatorConfig,
+    ReplicaGroupState,
 )
 from kubbernetd.operator.metrics import MetricsExporter
 
@@ -44,7 +46,7 @@ class ReplicaGroupController:
             name=name,
             namespace=namespace,
             spec=spec,
-            phase=self._initial_phase(spec),
+            phase=self._initial_phase(spec, namespace),
         )
         with self._lock:
             self._groups[(name, namespace)] = state
@@ -53,12 +55,22 @@ class ReplicaGroupController:
                  model=spec_model.get("name", "unknown"),
                  workers=spec_model.get("workers", 1))
 
-    def _initial_phase(self, spec: dict) -> GroupPhase:
+    def _initial_phase(self, spec: dict, namespace: str = "default") -> GroupPhase:
         target = spec.get("targetRef", {})
-        kind = target.get("kind", "Deployment")
         name = target.get("name", "")
+        kind = target.get("kind", "Deployment")
         if not name:
             return GroupPhase.UNKNOWN
+        # If the target workload is already scaled to zero, start SLEEPING so a
+        # cold request can wake it immediately. A group initialised as RUNNING
+        # with no workers never becomes ready within the wake window.
+        if kind == "Deployment":
+            try:
+                dep = self.apps_api.read_namespaced_deployment(name=name, namespace=namespace)
+                if (dep.spec.replicas or 0) == 0:
+                    return GroupPhase.SLEEPING
+            except Exception:
+                pass
         return GroupPhase.RUNNING
 
     def remove_group(self, name: str, namespace: str):
@@ -200,7 +212,10 @@ class ReplicaGroupController:
             return
         self._reconcile_worker_count(name, namespace, state)
         if state.current_workers == 0:
-            self._transition(name, namespace, state, GroupPhase.SLEEPING)
+            # A running group with no workers must sleep. RUNNING -> SLEEPING is
+            # not a permitted transition, so route via DRAINING (which scales
+            # down to zero and then transitions to SLEEPING).
+            self._transition(name, namespace, state, GroupPhase.DRAINING)
             return
         idle_seconds = self._idle_seconds(name, namespace, now)
         if idle_seconds is None:
@@ -235,7 +250,6 @@ class ReplicaGroupController:
     def _handle_draining(self, name: str, namespace: str, state: ReplicaGroupState, now: float):
         self._set_condition(state, "Draining", "True", "WaitingForSequences", "draining active requests")
         self._write_status(name, namespace, state)
-        target = state.spec.get("targetRef", {}).get("name", "")
         active = self._has_active_proxy_requests(name, namespace)
         drain_timeout = state.spec.get("sleepPolicy", {}).get("drainTimeout", 60)
         start = state.stage_started_at
@@ -271,6 +285,7 @@ class ReplicaGroupController:
         self._write_status(name, namespace, state)
         if self._wake_requested(name, namespace):
             state.status.wakeCount += 1
+            state.wake_started_at = now
             self._clear_wake_annotation(name, namespace)
             self._transition(name, namespace, state, GroupPhase.ALLOCATING)
 
@@ -359,6 +374,8 @@ class ReplicaGroupController:
             state.wake_stages.warmup = time.monotonic() - state.stage_started_at
             elapsed = time.monotonic() - state.wake_started_at
             state.status.lastWakeDuration = elapsed
+            state.error_count = 0
+            state.last_error_at = 0.0
             self._set_condition(state, "Ready", "True", "Running", "all workers ready and serving")
             self._write_status(name, namespace, state)
             self._transition(name, namespace, state, GroupPhase.RUNNING)

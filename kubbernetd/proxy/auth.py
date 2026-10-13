@@ -1,3 +1,5 @@
+import asyncio
+
 import structlog
 from kubernetes import client
 
@@ -9,11 +11,14 @@ class TargetAuthorizer:
         self.custom_api = client.CustomObjectsApi()
 
     async def authorize(self, namespace: str, service: str) -> bool:
+        loop = asyncio.get_running_loop()
         try:
-            self.custom_api.get_namespaced_custom_object(
-                group="kubbernetd.io", version="v1",
-                namespace=namespace, plural="replicagroups",
-                name=service,
+            await loop.run_in_executor(
+                None, lambda: self.custom_api.get_namespaced_custom_object(
+                    group="kubbernetd.io", version="v1",
+                    namespace=namespace, plural="replicagroups",
+                    name=service,
+                )
             )
             return True
         except client.exceptions.ApiException as e:

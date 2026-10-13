@@ -1,5 +1,5 @@
 import structlog
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from prometheus_client.registry import REGISTRY, DuplicateTimeseries
 
 from kubbernetd.common.types import OperatorConfig
