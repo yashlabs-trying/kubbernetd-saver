@@ -123,6 +123,10 @@ jobs:
           kubectl get crd replicagroups.kubbernetd.io -o name
           kubectl get namespace kubbernetd
           kubectl get deployment kubbernetd-operator -n kubbernetd
+          # install applies the released image ref; re-pin to the locally built
+          # image so the operator keeps running the code under test.
+          kubectl -n kubbernetd set image deployment/kubbernetd-operator operator=kubbernetd/operator:ci
+          kubectl -n kubbernetd rollout status deployment/kubbernetd-operator --timeout=90s
           echo "Install smoke test passed"
 
       - name: Deploy test model (nginx)
