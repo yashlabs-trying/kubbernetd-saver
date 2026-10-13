@@ -515,9 +515,9 @@ jobs:
           TOTAL_MS=$(( (END_TS - START_TS) / 1000000 ))
           echo "total_elapsed_ms=${TOTAL_MS}"
 
-          SUCCESS=$(grep -c "^200$" /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
-          FAILURES=$(grep -c -v "^200$" /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
-          TOTAL=$(wc -l < /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
+          TOTAL=$(awk 'END{print NR+0}' /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
+          SUCCESS=$(awk '/^200$/{n++} END{print n+0}' /tmp/e2e_9_results.txt 2>/dev/null || echo 0)
+          FAILURES=$((TOTAL - SUCCESS))
           echo "total=${TOTAL} success=${SUCCESS} failures=${FAILURES}"
 
           R_AFTER=$(kubectl get deployment test-model -o jsonpath='{.spec.replicas}')
