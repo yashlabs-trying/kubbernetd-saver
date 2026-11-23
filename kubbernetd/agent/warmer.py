@@ -1,8 +1,7 @@
-import os
 import subprocess
-import time
-import structlog
 from pathlib import Path
+
+import structlog
 
 from kubbernetd.common.types import AgentConfig
 
@@ -19,7 +18,7 @@ class ModelWarmer:
 
         if cmd:
             log.info("running user warmup command", cmd=cmd)
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
             if result.returncode != 0:
                 log.error("warmup command failed", stderr=result.stderr, stdout=result.stdout)
                 return False

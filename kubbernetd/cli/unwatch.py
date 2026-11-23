@@ -4,7 +4,7 @@ from kubernetes import client, config
 
 def _try_load_kube():
     try:
-        config.load_incluster_client()
+        config.load_incluster_config()
     except Exception:
         config.load_kube_config()
 

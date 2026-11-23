@@ -100,7 +100,7 @@ spec:
                       type: string
                     cpuRAM:
                       type: string
-                      default: 0
+                      default: "0"
                 sleepPolicy:
                   type: object
                   properties:

@@ -1,9 +1,7 @@
-import os
-import sys
-import tempfile
-import typer
-import structlog
 from pathlib import Path
+
+import structlog
+import typer
 
 log = structlog.get_logger()
 
@@ -34,7 +32,7 @@ def install(
 
     result = subprocess.run(
         ["kubectl", "apply", "-f", crd],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         typer.echo(f"Failed to apply CRD: {result.stderr}", err=True)
@@ -43,13 +41,13 @@ def install(
 
     result = subprocess.run(
         ["kubectl", "create", "namespace", namespace, "--dry-run=client", "-o", "yaml"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
-    subprocess.run(["kubectl", "apply", "-f", "-"], input=result.stdout, capture_output=True)
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=result.stdout, capture_output=True, text=True, check=False)
 
     result = subprocess.run(
         ["kubectl", "apply", "-f", rbac, "-n", namespace],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         typer.echo(f"Failed to apply RBAC: {result.stderr}", err=True)
@@ -58,7 +56,7 @@ def install(
 
     result = subprocess.run(
         ["kubectl", "apply", "-f", deploy, "-n", namespace],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         typer.echo(f"Failed to apply operator deployment: {result.stderr}", err=True)
@@ -68,7 +66,7 @@ def install(
     if set_default:
         subprocess.run(
             ["kubectl", "config", "set-context", "--current", f"--namespace={namespace}"],
-            capture_output=True,
+            capture_output=True, check=False,
         )
 
     typer.echo("")

@@ -1,13 +1,12 @@
-import typer
 from kubernetes import client, config
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
+from rich.table import Table
 
 
 def _try_load_kube():
     try:
-        config.load_incluster_client()
+        config.load_incluster_config()
     except Exception:
         config.load_kube_config()
 

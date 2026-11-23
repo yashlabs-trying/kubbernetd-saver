@@ -1,9 +1,9 @@
 import asyncio
 import time
-import structlog
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+
+import structlog
 
 log = structlog.get_logger()
 
@@ -11,7 +11,7 @@ log = structlog.get_logger()
 @dataclass
 class HoldingEntry:
     created_at: float = field(default_factory=time.monotonic)
-    request_data: Optional[tuple] = None
+    request_data: tuple | None = None
 
 
 class RequestBuffer:

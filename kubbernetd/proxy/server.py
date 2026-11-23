@@ -1,13 +1,14 @@
 import asyncio
+
 import structlog
 from aiohttp import web
 from kubernetes import client
 
+from kubbernetd.proxy.auth import TargetAuthorizer
 from kubbernetd.proxy.buffer import RequestBuffer
+from kubbernetd.proxy.discovery import EndpointDiscovery
 from kubbernetd.proxy.forwarder import RequestForwarder
 from kubbernetd.proxy.signal import GroupSignaler
-from kubbernetd.proxy.discovery import EndpointDiscovery
-from kubbernetd.proxy.auth import TargetAuthorizer
 
 log = structlog.get_logger()
 ACTIVE_ANNOTATION = "kubbernetd.io/active-requests"
@@ -53,6 +54,7 @@ class ProxyServer:
 
     async def _set_active(self, namespace: str, rg_name: str, active: bool):
         key = (namespace, rg_name)
+        loop = asyncio.get_running_loop()
         async with self._active_lock:
             prev = self._active_counter.get(key, 0)
             if active:
@@ -60,10 +62,12 @@ class ProxyServer:
                 if prev == 0:
                     try:
                         patch = {"metadata": {"annotations": {ACTIVE_ANNOTATION: "1"}}}
-                        self.custom_api.patch_namespaced_custom_object(
-                            group="kubbernetd.io", version="v1",
-                            namespace=namespace, plural="replicagroups",
-                            name=rg_name, body=patch,
+                        await loop.run_in_executor(
+                            None, lambda: self.custom_api.patch_namespaced_custom_object(
+                                group="kubbernetd.io", version="v1",
+                                namespace=namespace, plural="replicagroups",
+                                name=rg_name, body=patch,
+                            )
                         )
                     except Exception:
                         pass
@@ -73,10 +77,12 @@ class ProxyServer:
                     self._active_counter.pop(key, None)
                     try:
                         patch = {"metadata": {"annotations": {ACTIVE_ANNOTATION: None}}}
-                        self.custom_api.patch_namespaced_custom_object(
-                            group="kubbernetd.io", version="v1",
-                            namespace=namespace, plural="replicagroups",
-                            name=rg_name, body=patch,
+                        await loop.run_in_executor(
+                            None, lambda: self.custom_api.patch_namespaced_custom_object(
+                                group="kubbernetd.io", version="v1",
+                                namespace=namespace, plural="replicagroups",
+                                name=rg_name, body=patch,
+                            )
                         )
                     except Exception:
                         pass
@@ -84,11 +90,14 @@ class ProxyServer:
                     self._active_counter[key] = new_val
 
     async def _resolve_target_service(self, namespace: str, rg_name: str) -> str:
+        loop = asyncio.get_running_loop()
         try:
-            rg = self.custom_api.get_namespaced_custom_object(
-                group="kubbernetd.io", version="v1",
-                namespace=namespace, plural="replicagroups",
-                name=rg_name,
+            rg = await loop.run_in_executor(
+                None, lambda: self.custom_api.get_namespaced_custom_object(
+                    group="kubbernetd.io", version="v1",
+                    namespace=namespace, plural="replicagroups",
+                    name=rg_name,
+                )
             )
             spec = rg.get("spec", {})
             target = spec.get("targetRef", {})
@@ -117,6 +126,9 @@ class ProxyServer:
                     target_ip=target_ip,
                 )
             return await self._hold_and_wake(request, namespace, rg_name, target_service)
+        except asyncio.CancelledError:
+            self.buffer.release(namespace, rg_name)
+            raise
         finally:
             await self._set_active(namespace, rg_name, False)
 
@@ -140,13 +152,26 @@ class ProxyServer:
         except asyncio.TimeoutError:
             log.warning("wake timeout", group=group, namespace=namespace)
             return web.Response(status=504, text="replicagroup did not become ready in time")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # A wake failure must surface as a clean error, not an HTTP 500.
+            log.warning("wake failed for held request", group=group, namespace=namespace, error=str(e))
+            return web.Response(status=503, text=f"wake failed: {e}")
 
     async def _trigger_wake(self, namespace: str, group: str, target_service: str):
         try:
             ready = await self.signaler.ensure_ready(namespace, group, target_service)
             if ready:
                 entries = self.buffer.release(namespace, group)
-                target_ip = self.discovery.next_ip(namespace, target_service)
+                # The group can report ready before its endpoint is registered.
+                # Poll briefly so held requests are forwarded instead of dropped.
+                target_ip = None
+                for _ in range(30):
+                    target_ip = self.discovery.next_ip(namespace, target_service)
+                    if target_ip:
+                        break
+                    await asyncio.sleep(0.5)
                 if target_ip and entries:
                     sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
@@ -166,9 +191,18 @@ class ProxyServer:
 
                     tasks = [_forward_one(f, e) for f, e in entries if not f.done()]
                     await asyncio.gather(*tasks, return_exceptions=True)
-                elif not target_ip:
-                    self._fail_held(namespace, group, "no ready workers after wake")
-                log.info("wake complete, forwarded held requests", group=group, count=len(entries))
+                    log.info("wake complete, forwarded held requests", group=group, count=len(entries))
+                else:
+                    # The buffer was already released above, so fail the held
+                    # futures directly (calling _fail_held here would act on an
+                    # empty buffer and leave the requests to time out).
+                    for future, _ in entries:
+                        if not future.done():
+                            future.set_exception(Exception("no ready workers after wake"))
+                    log.warning(
+                        "failed held requests", group=group, count=len(entries),
+                        reason="no ready workers after wake",
+                    )
             else:
                 self._fail_held(namespace, group, "wake failed - group not ready")
         except Exception as e:

@@ -1,8 +1,6 @@
-import os
 import sys
 import time
 from threading import Lock
-from typing import Optional
 
 import structlog
 
@@ -44,7 +42,7 @@ class IdleDetector:
         with self._lock:
             self._last_request[(namespace, name)] = time.monotonic()
 
-    def idle_seconds(self, namespace: str, name: str) -> Optional[float]:
+    def idle_seconds(self, namespace: str, name: str) -> float | None:
         with self._lock:
             last = self._last_request.get((namespace, name))
             if last is None or (namespace, name) not in self._watched:
