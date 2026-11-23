@@ -39,7 +39,7 @@ ready", and it measures cold start stage by stage.
 | **ColdTTFT benchmark** | [`deploy/cold-ttft-benchmark.sh`](deploy/cold-ttft-benchmark.sh) times every stage T0–T9: scheduling, container start, weight load, engine init, routing, first token. |
 | **CLI** | `install`, `watch`, `unwatch`, `status`, `dashboard` (estimated savings). |
 
-**Tests:** 77 unit tests, plus 9 end-to-end scenarios that run in CI on a real
+**Tests:** 88 unit tests, plus 9 end-to-end scenarios that run in CI on a real
 [kind](https://kind.sigs.k8s.io/) cluster with the operator and proxy deployed:
 
 1. idle deployment scales itself to zero
@@ -52,6 +52,11 @@ ready", and it measures cold start stage by stage.
 8. a slow-starting model's real readiness delay is respected
 9. 100 concurrent requests against a cold deployment
 
+A single-cluster audit on kind found and fixed **12 bugs** (4 critical), and also
+ran a 30-cycle sleep/wake lifecycle, fault injection, and a multi-node gate
+(node drain, control-plane restart, cross-node cold wake). See the
+[audit report](testing/audit/FINAL_REPORT.md).
+
 ## Quick start
 
 kubbernetd is not published to PyPI yet; install from source.
@@ -60,7 +65,7 @@ kubbernetd is not published to PyPI yet; install from source.
 git clone https://github.com/yashlabs-trying/kubbernetd-saver
 cd kubbernetd-saver
 pip install -e ".[test]"
-pytest -q                       # 77 unit tests, no cluster needed
+pytest -q                       # 88 unit tests, no cluster needed
 
 # Install CRDs, RBAC, operator and proxy into the current kube-context
 kubbernetd install --namespace kubbernetd
