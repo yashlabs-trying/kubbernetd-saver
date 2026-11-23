@@ -8,9 +8,13 @@ The operator maintains an in-memory map of last-request timestamps per (namespac
 
 When the operator decides to scale down, it patches the Deployment's `spec.replicas` to 0 via the Kubernetes API. The Service and Endpoints remain intact — they just point to nothing.
 
-## Shadow Pod Instant Cold Start
+## Warm standby ("shadow") pods — planned
 
-When a deployment has `shadowPods > 0`, the operator keeps that many hidden pods running (not in the Service's selector). On scale-up, it swaps the shadow pod into the selector first, then spins up the rest. This gives near-instant cold starts.
+The `shadowPods` field is accepted by the CRD and stored by the operator, but is
+not acted on yet. The design: keep N hidden ready pods outside the Service
+selector and swap one in on wake-up, so the first request does not wait for a
+full cold start. Until then, wake-up latency is the full cold start, measured
+stage by stage with `deploy/cold-ttft-benchmark.sh`.
 
 ## Request Buffering
 

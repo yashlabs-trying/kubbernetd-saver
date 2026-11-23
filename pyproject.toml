@@ -9,7 +9,7 @@ description = "Scale K8s pods to zero when idle to save costs. Instant cold star
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "kubbernetd", email = "dev@kubbernetd.io" },
+    { name = "Yashvardhan Singh Shekhawat", email = "novalabs0.ai@gmail.com" },
 ]
 requires-python = ">=3.10"
 dependencies = [

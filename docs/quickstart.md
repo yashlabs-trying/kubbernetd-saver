@@ -9,7 +9,9 @@
 ## Install
 
 ```bash
-pip install kubbernetd
+git clone https://github.com/yashlabs-trying/kubbernetd-saver
+cd kubbernetd-saver
+pip install -e .
 
 # Install the operator into your cluster
 kubbernetd install --namespace kubbernetd
